@@ -325,11 +325,36 @@ Fatal glibc error: tpp.c:83 (__pthread_tpp_change_priority): assertion failed: .
 
 Four different glibc/pthread failure modes from one deterministic input is the
 signature of memory corruption inside ESBMC scribbling over glibc's thread
-structures. Ruled out as causes: the input is single-threaded; the machine had
-177 GB free and 797 of 1.49 M threads in use; no `--memlimit` or
-`--enable-keep-alive` was passed, so ESBMC's own `setrlimit`/thread paths are
-not entered; peak RSS was ~100 MB. Raising the stack to unlimited converts the
-abort into a **hang with zero CPU time** — i.e. a deadlock rather than a fix.
+structures.
+
+**Root cause (diagnosed under gdb): use-after-free of `irept::dt`.** The abort
+resolves to `irept::detatch` (`src/util/irep.cpp:48`) locking
+`old_data->dt_mutex`, reached from `clang_c_adjust::adjust_comma`. The block
+being locked is already freed and recycled:
+
+```
+(gdb) p *data
+$2 = {ref_count = 0,
+      dt_mutex = {... __lock = -2147483487, __owner = 157060624,
+                  __kind = 170985904 ...},
+      named_sub = {... _M_color = (unknown: 0xa302e70) ...}}
+```
+
+`ref_count` is already 0, `__kind` is not a valid mutex kind, and an `_M_color`
+enum holds a pointer. The bogus `__kind` is what sends glibc down the
+priority-inheritance path (`__futex_lock_pi64`), which is why the symptom
+shifts between runs.
+
+Two earlier hypotheses are **ruled out**: it is not a data race (`info threads`
+shows exactly one thread), and it is not stack exhaustion (the full backtrace
+is 44 frames). The observation that `ulimit -s unlimited` changes the symptom
+was a red herring — it perturbs allocation layout so the freed block is
+recycled differently. Also ruled out: resource exhaustion (177 GB free, 797 of
+1.49 M threads, peak RSS ~100 MB) and ESBMC's own `setrlimit`/thread paths
+(neither `--memlimit` nor `--enable-keep-alive` was passed).
+
+What remains unknown is *where* the reference count is unbalanced. See
+[ESBMC_FIX_PLAN.md](ESBMC_FIX_PLAN.md) for the plan to find it.
 
 Bisection: keeping `Array<T>` and dropping `CryptoBuffer` from `Array.h` makes
 the same input convert and verify successfully. `scripts/make_model_headers.sh`
