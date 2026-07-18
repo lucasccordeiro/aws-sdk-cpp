@@ -347,8 +347,16 @@ exist but does not bound the set of inputs that trigger them.
 
 ### Issues filed against esbmc/esbmc
 
-* OM gaps (with patches) — see `esbmc_bug_repros/om_*.cpp`
-* GOTO-conversion crash — see `esbmc_bug_repros/crash_goto_convert_array.cpp`
+* **[esbmc/esbmc#6183](https://github.com/esbmc/esbmc/issues/6183)** — C++ OM
+  missing `type_traits`, `unique_ptr`, `basic_string` and `shared_ptr` members.
+  Reproducers: `esbmc_bug_repros/om_*.cpp`. A patch for the two gaps that cannot
+  be shimmed externally is on branch `fix/cpp-om-unique-ptr-nullptr-assign`
+  (+75 lines to `src/cpp/library/{memory,string}`).
+* **[esbmc/esbmc#6184](https://github.com/esbmc/esbmc/issues/6184)** — SIGABRT
+  during GOTO conversion on `ByteBuffer`, with varying glibc pthread
+  assertions. Reproducer:
+  `esbmc_bug_repros/crash_goto_convert_array.cpp`. Depends on #6183's patches
+  to get far enough to crash.
 
 ---
 
