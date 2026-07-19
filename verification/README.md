@@ -48,19 +48,29 @@ make repros   # the ESBMC bug reproducers
 make model    # regenerate model/ from vendor/
 ```
 
-`make asan` is the one that currently produces results. The ESBMC targets are
-blocked by a crash in ESBMC 8.4.0's GOTO conversion — see REPORT.md, section
-"ESBMC frontend results".
+`make asan` is the one that produces the findings. `make smoke` is **green**
+against a build carrying esbmc/esbmc#6190 and #6195 — ESBMC converts and
+symexes `Aws::Utils::ByteBuffer`.
+
+`make esbmc` now runs the symbolic harnesses end-to-end but does not yet yield
+a verdict on `Decode`: it fails on a spurious `basic_string overflow` inside
+ESBMC's own string model, which asserts `n < strlen(s)` and so rejects the
+valid `std::string("abc", 3)`. Reproducer:
+`esbmc_bug_repros/om_string_ptr_len_ctor.cpp`. See REPORT.md, "Blocked again,
+one layer up", and ESBMC_FIX_PLAN.md.
 
 ## Toolchain notes
 
 * ESBMC 8.4.0 uses `--std c++11` and `--goto-functions-only`. The older
   `--cppstd` / `--parse-only` spellings do not exist.
-* The ESBMC targets assume two local patches to `src/cpp/library/{memory,string}`
-  (missing `unique_ptr`/`basic_string` members). Without them the run stops at a
-  parse error. These are member functions of operational-model types and cannot
-  be supplied from outside; the rest of the gaps are handled by
-  `stubs/esbmc_compat.h`.
+* The ESBMC targets require [PR #6190](https://github.com/esbmc/esbmc/pull/6190)
+  (merged 2026-07-19, closing issue #6183), which added the missing
+  `unique_ptr`/`basic_string`/`type_traits` members to `src/cpp/library/`.
+  Against an older build the run stops at a parse error instead.
+* The one remaining OM gap is `std::shared_ptr`, still shimmed in
+  `stubs/esbmc_compat.h` behind `-D ESBMC_OM_MISSING_SHARED_PTR`. Note this
+  define is **required** against a #6190 build and **must not** be paired with
+  the pre-#6190 traits shim, which would now be a redefinition error.
 * `--memory-leak-check` is not meaningful against this operational model:
   ESBMC's OM `unique_ptr` has its destructor `#if 0`-ed out, so nothing is ever
   released.

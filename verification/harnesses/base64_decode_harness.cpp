@@ -77,9 +77,10 @@ int main()
   const Aws::String input(raw, len);
   const Aws::Utils::Base64::Base64 codec;
 
-  /* The property is memory safety of the call itself: ESBMC's --bounds-check
-   * and --pointer-check watch every buffer[...] store inside Decode, and
-   * Array::GetItem's own assert(index < m_length) fires first when enabled.
+  /* The property is memory safety of the call itself: ESBMC's array-bounds and
+   * pointer checks (on by default; only --no-bounds-check / --no-pointer-check
+   * exist) watch every buffer[...] store inside Decode, and Array::GetItem's
+   * own assert(index < m_length) fires first when enabled.
    * No postcondition is asserted here on purpose -- a spurious functional
    * assertion would muddy a genuine memory-safety counterexample. */
   const Aws::Utils::ByteBuffer out = codec.Decode(input);
