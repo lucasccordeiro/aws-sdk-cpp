@@ -1,21 +1,30 @@
 # Verification harnesses for aws-cpp-sdk-core codecs.
 #
 #   make smoke      - ESBMC frontend/OM smoke test (concrete input, no properties)
+#   make confirm    - ESBMC on the two named defect inputs (B-1, B-2)
 #   make esbmc      - ESBMC memory-safety runs over the symbolic harnesses
-#   make asan       - concrete ASan reproducers (the oracle that currently works)
-#   make repros     - ESBMC frontend/crash reproducers for esbmc/esbmc issues
+#   make asan       - concrete ASan reproducers (independent cross-check)
+#   make repros     - status of the reproducers filed against esbmc/esbmc
 #   make model      - regenerate model/ from pristine vendor/
 #   make clean
 #
-# STATUS: the `esbmc` targets do not complete on this toolchain -- ESBMC 8.4.0
-# aborts during GOTO conversion on Aws::Utils::Array<unsigned char>. See
-# REPORT.md and esbmc_bug_repros/. The `asan` target is what actually
-# discharges the memory-safety claims today.
+# STATUS: the `esbmc` targets now run. ESBMC master (>= esbmc/esbmc#6190 and
+# #6195, which closed #6183 and #6184) both parses the target and converts
+# Aws::Utils::Array<unsigned char> without aborting, and independently confirms
+# defects B-1 and B-2. See REPORT.md.
+#
+# UNWIND is load-bearing -- do not lower it. Base64::Base64() populates a
+# 256-entry decoding table via memset(256) plus a 64-iteration fill loop. Under
+# a small --unwind those loops are truncated, every byte maps to SENTINEL_VALUE,
+# the value3/value4 guards in Decode skip both inner writes, and ESBMC reports
+# VERIFICATION SUCCESSFUL on a program that overflows. The old value here was 8,
+# which produced exactly that false negative. Tell-tale of a vacuous run: ~100
+# VCCs instead of ~18000.
 
 ESBMC       ?= esbmc
 CXX         ?= g++
-UNWIND      ?= 8
-MAXLEN      ?= 6
+UNWIND      ?= 300
+MAXLEN      ?= 7
 
 VERIF_DIR   := $(CURDIR)
 INCLUDES    := -Istubs -Ivendor -Imodel/include
@@ -24,16 +33,28 @@ INCLUDES    := -Istubs -Ivendor -Imodel/include
 ASAN_INC    := -Istubs -Ivendor -Ivendor/include
 
 ESBMC_STD   := --std c++11
-ESBMC_DEFS  := -D ESBMC_OM_MISSING_TRAITS
-ESBMC_PROPS := --memory-leak-check --bounds-check --pointer-check
+# -D ESBMC_OM_MISSING_TRAITS is deliberately absent: #6190 added those traits to
+# the OM, so re-supplying them from the shim is now a redefinition error.
+ESBMC_DEFS  :=
+# Bounds and pointer checks are on by default; only --no-* forms exist, and
+# passing --bounds-check / --pointer-check aborts ESBMC outright.
+#
+# --force-malloc-success suppresses the allocation-failure counterexample from
+# the Aws::Malloc stub, which otherwise masks the defect under test.
+#
+# --memory-leak-check is deliberately NOT passed. ESBMC's OM unique_ptr has its
+# destructor #if 0-ed out ("TODO: fix remove goto sideeffect"), so the model
+# never releases and every ByteBuffer reports "forgotten memory". That is an
+# artefact of the model, and it fires before the defect under test.
+ESBMC_PROPS := --force-malloc-success
 ESBMC_BOUND := --unwind $(UNWIND) --no-unwinding-assertions
 
 MEMSTUB     := stubs/aws_memory_stub.cpp
 RESULTS     := results
 
-.PHONY: all smoke esbmc asan repros model clean
+.PHONY: all smoke confirm esbmc asan repros model clean
 
-all: asan
+all: confirm asan
 
 model:
 	@./scripts/make_model_headers.sh
@@ -48,7 +69,23 @@ smoke: model | $(RESULTS)
 	@echo "== ESBMC smoke test (concrete input) =="
 	-$(ESBMC) $(ESBMC_STD) $(ESBMC_DEFS) $(INCLUDES) \
 	    harnesses/smoke_harness.cpp $(MEMSTUB) \
-	    $(ESBMC_BOUND) 2>&1 | tee $(RESULTS)/smoke.log
+	    $(ESBMC_PROPS) $(ESBMC_BOUND) 2>&1 | tee $(RESULTS)/smoke.log
+
+# ---------------------------------------------------------------------------
+# Step 2: the two defects on their named inputs. Both are expected to report
+# VERIFICATION FAILED -- that is the confirmation, not a problem.
+# ---------------------------------------------------------------------------
+confirm: model | $(RESULTS)
+	@echo "== B-1: \"AAAA=\" -- expect assertion GetItem (index < m_length) =="
+	-$(ESBMC) $(ESBMC_STD) $(ESBMC_DEFS) $(INCLUDES) \
+	    harnesses/base64_decode_concrete.cpp $(MEMSTUB) \
+	    $(ESBMC_PROPS) $(ESBMC_BOUND) 2>&1 | tee $(RESULTS)/confirm_b1.log \
+	    | grep -E "Violated|assertion GetItem|VERIFICATION"
+	@echo "== B-2: 0xffffffff -- expect access to object out of bounds =="
+	-$(ESBMC) $(ESBMC_STD) $(ESBMC_DEFS) $(INCLUDES) -D CASE_B2 \
+	    harnesses/base64_decode_concrete.cpp $(MEMSTUB) \
+	    $(ESBMC_PROPS) $(ESBMC_BOUND) 2>&1 | tee $(RESULTS)/confirm_b2.log \
+	    | grep -E "Violated|dereference failure|VERIFICATION"
 
 # ---------------------------------------------------------------------------
 # Step 3: memory-safety runs.
@@ -123,19 +160,23 @@ asan: | $(RESULTS)
 	@rm -f $(RESULTS)/.err
 
 # ---------------------------------------------------------------------------
-# Reproducers filed against esbmc/esbmc.
+# Reproducers filed against esbmc/esbmc. All three are FIXED upstream, so all
+# three are now expected to report VERIFICATION SUCCESSFUL. A failure here means
+# a regression in ESBMC, or an ESBMC older than the fixes.
+#   #6183 (OM gaps)          -> fixed by #6190
+#   #6184 (GOTO-convert SIGABRT) -> fixed by #6195
 # ---------------------------------------------------------------------------
 repros: model | $(RESULTS)
-	@echo "== OM: missing <type_traits> members =="
+	@echo "== OM: missing <type_traits> members (#6183, fixed) =="
 	-$(ESBMC) $(ESBMC_STD) esbmc_bug_repros/om_missing_type_traits.cpp 2>&1 \
 	    | tail -4 | tee $(RESULTS)/repro_traits.log
-	@echo "== OM: unique_ptr operator=(nullptr_t) =="
+	@echo "== OM: unique_ptr operator=(nullptr_t) (#6183, fixed) =="
 	-$(ESBMC) $(ESBMC_STD) esbmc_bug_repros/om_unique_ptr_nullptr_assign.cpp 2>&1 \
 	    | tail -4 | tee $(RESULTS)/repro_uniqptr.log
-	@echo "== crash: GOTO conversion of Array<unsigned char> =="
+	@echo "== crash: GOTO conversion of Array<unsigned char> (#6184, fixed) =="
 	-$(ESBMC) $(ESBMC_STD) $(ESBMC_DEFS) -Istubs -Imodel/include \
 	    esbmc_bug_repros/crash_goto_convert_array.cpp \
-	    $(ESBMC_BOUND) 2>&1 | tail -4 | tee $(RESULTS)/repro_crash.log
+	    $(ESBMC_PROPS) $(ESBMC_BOUND) 2>&1 | tail -4 | tee $(RESULTS)/repro_crash.log
 
 clean:
 	rm -rf $(RESULTS) model

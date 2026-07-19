@@ -3,7 +3,7 @@
 **Target:** `aws/aws-sdk-cpp` @ `95988ca5527201b4ed8804a942d8d0788ad1755c` (v1.11.850)
 **Function under analysis:** `Aws::Utils::Base64::Base64::Decode`
 (`src/aws-cpp-sdk-core/source/utils/base64/Base64.cpp:91-121`)
-**Tool:** ESBMC 8.4.0, x86_64 linux
+**Tool:** ESBMC master `d0bb9881f2` (originally reported against 8.4.0)
 **Cross-check:** GCC + AddressSanitizer/UBSan
 
 ---
@@ -23,11 +23,32 @@ Both were **confirmed with a concrete reproducer under AddressSanitizer**, not
 merely predicted. Neither is an artefact of an under-constrained harness — see
 "Is it real?" below.
 
-ESBMC's C++ frontend **did not ingest the target**. Seven distinct gaps in its
-C++ operational model were found and worked around, after which ESBMC **aborts
-during GOTO conversion** on `Aws::Utils::Array<unsigned char>`. That crash
-blocks the symbolic proof, so ASan is the oracle that actually discharges the
-claims here. Details in "ESBMC frontend results".
+**Both are now independently confirmed by ESBMC as well.** The frontend blockers
+described in the original version of this report were fixed upstream
+([#6190](https://github.com/esbmc/esbmc/pull/6190) closing
+[#6183](https://github.com/esbmc/esbmc/issues/6183), and
+[#6195](https://github.com/esbmc/esbmc/pull/6195) closing
+[#6184](https://github.com/esbmc/esbmc/issues/6184)), and the harnesses in this
+directory now run:
+
+| Run | Verdict |
+|---|---|
+| B-1, concrete `"AAAA="` | `VERIFICATION FAILED` — `assertion GetItem`, `index < m_length` violated, after `allocationSize = 2` |
+| B-1, symbolic, RFC 4648 alphabet only | `VERIFICATION FAILED` — same property |
+| B-2, concrete `\xFF\xFF\xFF\xFF` | `VERIFICATION FAILED` — `dereference failure: access to object out of bounds` at `Base64.cpp:103` |
+
+The symbolic alphabet-constrained run is the stronger result: it says the
+overflow follows from the length arithmetic itself, over *every* input of length
+< 7 drawn from the base64 alphabet, not just the three hand-picked strings ASan
+was pointed at.
+
+⚠️ **`--unwind` is load-bearing.** `Base64::Base64()` fills a 256-entry decoding
+table via `memset(256)` plus a 64-iteration loop. Under a small `--unwind` those
+loops are truncated, every byte maps to `SENTINEL_VALUE`, the `value3`/`value4`
+guards skip both inner writes, and ESBMC reports **`VERIFICATION SUCCESSFUL` on
+a program that overflows**. The Makefile's original `--unwind 8` produced exactly
+that false negative; it is now 300. Tell-tale of a vacuous run: ~100 VCCs where
+a real one generates ~18000.
 
 ---
 
@@ -221,6 +242,14 @@ being signed.** On x86-64 Linux/GCC and Clang it is, so the SDK is affected on
 its most common server platform. On ARM (where `char` is unsigned by default)
 the same code is benign, as it is under `-funsigned-char`.
 
+This is where the symbolic run earns its keep. Re-running `make asan` on
+arm64 macOS reports `ok` for all four high-bit inputs — the wild address happens
+to be mapped there, so nothing faults and the sanitizer sees nothing. ESBMC
+flags the same inputs on the same machine, because it reasons about the declared
+bound of a 256-entry array rather than waiting for an unmapped page. A sanitizer
+finds a defect only where the platform happens to punish it; the bounds argument
+holds regardless.
+
 It is a read, not a write, so the impact is a crash (DoS) or, if the wild
 address happens to be mapped, decoding against attacker-influenced table data —
 not direct memory corruption. Lower severity than B-1, but the same root cause
@@ -260,8 +289,10 @@ for a strict RFC 4648 decoder, but is a behaviour change for existing callers.
 ## ESBMC frontend results
 
 The first question asked was whether ESBMC's C++ frontend ingests the target at
-all. **It does not, out of the box.** Here is exactly what blocked it, in the
-order encountered.
+all. **Originally it did not.** Everything in this section is the record of what
+blocked it; all of it is now fixed upstream except gap 8 (`std::shared_ptr`).
+Kept because it is the evidence behind the filed issues, and because anyone
+running against an older ESBMC will hit it again.
 
 Note: the flags in the original plan (`--cppstd`, `--parse-only`) do not exist
 in ESBMC 8.4.0; the equivalents are `--std` and `--goto-functions-only`.
@@ -291,10 +322,18 @@ With those, **GCC compiles the TU cleanly.** Everything below is ESBMC-specific.
 | 7 | `std::basic_string`: `const operator[]`, `push_back`, `reserve` | `Base64.cpp:55,73-76,133-135` | **patched ESBMC's OM** |
 | 8 | `std::shared_ptr` / `allocate_shared` — absent entirely | `AWSAllocator.h:105,117` | parse-only declaration in the shim |
 
-Gaps 2-5 and 8 are handled in `stubs/esbmc_compat.h` without touching ESBMC.
+Gaps 2-5 and 8 were handled in `stubs/esbmc_compat.h` without touching ESBMC.
 Gaps 6 and 7 are member functions of OM types and **cannot** be fixed from
 outside, so `src/cpp/library/{memory,string}` were patched locally; those
 patches are the basis of the upstream issue.
+
+**Current status:** gaps 1-7 are fixed upstream by #6190. Consequently the shim's
+traits block is now a *liability* — re-supplying `is_class` and friends on a
+current ESBMC is a redefinition error — so the Makefile no longer passes
+`-D ESBMC_OM_MISSING_TRAITS`, and the shim's `shared_ptr` half was moved outside
+that guard. **Gap 8 remains open**: `std::shared_ptr` / `std::allocate_shared`
+are still absent from `src/cpp/library`, so the parse-only declaration in the
+shim is still required.
 
 Notable: ESBMC's clang frontend already accepts the `__is_class` /
 `__is_polymorphic` / `__is_trivially_*` builtins, so gaps 2-5 are a few lines
@@ -338,36 +377,71 @@ constructing an `Array<unsigned char>` still crashes. A self-contained
 reduction (no AWS headers) was attempted and did not reproduce; the filed issue
 therefore points at this repository for exact reproduction.
 
-**Consequence for this exercise:** no symbolic proof was obtained. The
-harnesses in `harnesses/base64_decode_harness.cpp` are written, wired into
-`make esbmc`, and ready to run the moment the crash is fixed. Everything
-asserted about B-1 and B-2 above rests on the concrete ASan reproducers, which
-is weaker than a proof over all inputs up to a bound — it demonstrates the bugs
-exist but does not bound the set of inputs that trigger them.
+**Resolution.** Fixed by [#6195](https://github.com/esbmc/esbmc/pull/6195). The
+root cause was not `irept` refcounting but an out-of-bounds vector read on a
+malformed expression: placement new of a non-class type with no initializer
+(`new (p) int;`) built a one-operand `comma` node, and downstream `op1()`
+accesses read past the end of the operand vector. Reached here via
+`AWSMemory.h:185`, `new (pointerToT + i) T;` with `T = unsigned char`. Because
+the OOB read landed on whatever heap bytes were adjacent, the abort site — and
+so the message — varied with allocation layout, which is what made it look like
+nondeterministic corruption.
+
+`crash_goto_convert_array.cpp` now reports `VERIFICATION SUCCESSFUL`, and the
+symbolic harnesses run. B-1 and B-2 no longer rest on ASan alone.
+
+### Still open: `basic_string(const char*, size_t)`
+
+One further OM defect was found while getting the harnesses running, filed as
+[esbmc/esbmc#6199](https://github.com/esbmc/esbmc/issues/6199). The constructor
+asserts `n < strlen(s)`, but [string.cons] requires only that `[s, s + n)` be a
+valid range — `n` may equal or exceed `strlen(s)`, and the range may contain
+embedded nulls. The idiomatic exact-length form therefore fails inside the
+constructor:
+
+```cpp
+Aws::String input("AAAA=", 5);   // basic_string overflow
+```
+
+The harnesses work around it by keeping one spare byte in the backing array so
+`strlen(raw) > len` always holds — hence `__ESBMC_assume(len < MAXLEN)` rather
+than `<=` in `base64_decode_harness.cpp`, and the trailing filler byte in the
+string literals in `base64_decode_concrete.cpp`. Those fillers are **not** part
+of the input under test; the explicit length excludes them. Revert both once
+#6199 lands.
 
 ### Issues filed against esbmc/esbmc
 
-* **[esbmc/esbmc#6183](https://github.com/esbmc/esbmc/issues/6183)** — C++ OM
-  missing `type_traits`, `unique_ptr`, `basic_string` and `shared_ptr` members.
-  Reproducers: `esbmc_bug_repros/om_*.cpp`. A patch for the two gaps that cannot
-  be shimmed externally is on branch `fix/cpp-om-unique-ptr-nullptr-assign`
-  (+75 lines to `src/cpp/library/{memory,string}`).
-* **[esbmc/esbmc#6184](https://github.com/esbmc/esbmc/issues/6184)** — SIGABRT
-  during GOTO conversion on `ByteBuffer`, with varying glibc pthread
-  assertions. Reproducer:
-  `esbmc_bug_repros/crash_goto_convert_array.cpp`. Depends on #6183's patches
-  to get far enough to crash.
+* **[esbmc/esbmc#6183](https://github.com/esbmc/esbmc/issues/6183)** — *CLOSED,
+  fixed by [#6190](https://github.com/esbmc/esbmc/pull/6190).* C++ OM missing
+  `type_traits`, `unique_ptr`, `basic_string` and `shared_ptr` members.
+  Reproducers: `esbmc_bug_repros/om_*.cpp`, both now `VERIFICATION SUCCESSFUL`.
+  `std::shared_ptr` was out of scope for that fix and is still missing.
+* **[esbmc/esbmc#6184](https://github.com/esbmc/esbmc/issues/6184)** — *CLOSED,
+  fixed by [#6195](https://github.com/esbmc/esbmc/pull/6195).* SIGABRT during
+  GOTO conversion on `ByteBuffer`. Reproducer:
+  `esbmc_bug_repros/crash_goto_convert_array.cpp`, now `VERIFICATION SUCCESSFUL`.
+* **[esbmc/esbmc#6199](https://github.com/esbmc/esbmc/issues/6199)** — *OPEN.*
+  `basic_string(const char*, size_t n)` asserts `n < strlen(s)`, rejecting legal
+  input, and truncates at embedded nulls. See above.
 
 ---
 
 ## Reproducing
 
 ```bash
-make asan     # the confirmed findings — B-1 and B-2
-make smoke    # ESBMC frontend smoke test (currently aborts)
-make esbmc    # symbolic harnesses (blocked on the crash)
-make repros   # the ESBMC bug reproducers
+make confirm  # ESBMC on the two named defect inputs   -> both VERIFICATION FAILED
+make esbmc    # ESBMC over the symbolic harnesses      -> VERIFICATION FAILED
+make smoke    # ESBMC frontend/OM smoke test           -> VERIFICATION SUCCESSFUL
+make repros   # the three filed ESBMC reproducers      -> all VERIFICATION SUCCESSFUL
+make asan     # independent ASan cross-check
 ```
 
-`make asan` requires only GCC. The ESBMC targets require the two OM patches
-described above; without them the run stops at a parse error instead.
+`VERIFICATION FAILED` from `confirm` and `esbmc` is the expected, desired result
+— it is the confirmation. `repros` reporting `SUCCESSFUL` is likewise expected:
+those reproduce ESBMC bugs that are now fixed, so a failure there means an ESBMC
+regression or a build predating #6190/#6195.
+
+The ESBMC targets need a build at or after those two fixes; `make asan` requires
+only a C++ compiler. Both were last run against ESBMC master `d0bb9881f2` on
+arm64 macOS.
