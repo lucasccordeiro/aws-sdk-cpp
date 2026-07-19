@@ -8,10 +8,15 @@
 #   make model      - regenerate model/ from pristine vendor/
 #   make clean
 #
-# STATUS: the `esbmc` targets now run. ESBMC master (>= esbmc/esbmc#6190 and
-# #6195, which closed #6183 and #6184) both parses the target and converts
-# Aws::Utils::Array<unsigned char> without aborting, and independently confirms
-# defects B-1 and B-2. See REPORT.md.
+# STATUS: the `esbmc` targets now run and confirm both defects. esbmc/esbmc#6184
+# (placement new with no initializer -> one-operand "comma" -> adjust_comma reads
+# op1() out of bounds; reproducer esbmc_bug_repros/placement_new_no_init.cpp) is
+# fixed by #6195, and #6183 by #6190. Requires a build carrying both; against an
+# older one these targets stop at a parse error or abort instead.
+#
+# The remaining OM defect, esbmc/esbmc#6199 (basic_string(const char*, n) asserts
+# n < strlen(s); reproducer esbmc_bug_repros/om_string_ptr_len_ctor.cpp), is
+# worked around in the harnesses rather than blocking them -- see REPORT.md.
 #
 # UNWIND is load-bearing -- do not lower it. Base64::Base64() populates a
 # 256-entry decoding table via memset(256) plus a 64-iteration fill loop. Under
@@ -33,19 +38,14 @@ INCLUDES    := -Istubs -Ivendor -Imodel/include
 ASAN_INC    := -Istubs -Ivendor -Ivendor/include
 
 ESBMC_STD   := --std c++11
-# -D ESBMC_OM_MISSING_TRAITS is deliberately absent: #6190 added those traits to
-# the OM, so re-supplying them from the shim is now a redefinition error.
-ESBMC_DEFS  :=
-# Bounds and pointer checks are on by default; only --no-* forms exist, and
-# passing --bounds-check / --pointer-check aborts ESBMC outright.
-#
+ESBMC_DEFS  := -D ESBMC_OM_MISSING_SHARED_PTR
+# Array-bounds and pointer checks are ON BY DEFAULT in current ESBMC -- only
+# --no-bounds-check / --no-pointer-check exist. The old affirmative spellings
+# were removed and are now hard errors, so do not re-add them.
+# --memory-leak-check is deliberately NOT passed: the OM's unique_ptr has its
+# destructor #if 0-ed out, so a leak verdict against this model is meaningless.
 # --force-malloc-success suppresses the allocation-failure counterexample from
 # the Aws::Malloc stub, which otherwise masks the defect under test.
-#
-# --memory-leak-check is deliberately NOT passed. ESBMC's OM unique_ptr has its
-# destructor #if 0-ed out ("TODO: fix remove goto sideeffect"), so the model
-# never releases and every ByteBuffer reports "forgotten memory". That is an
-# artefact of the model, and it fires before the defect under test.
 ESBMC_PROPS := --force-malloc-success
 ESBMC_BOUND := --unwind $(UNWIND) --no-unwinding-assertions
 
@@ -160,11 +160,13 @@ asan: | $(RESULTS)
 	@rm -f $(RESULTS)/.err
 
 # ---------------------------------------------------------------------------
-# Reproducers filed against esbmc/esbmc. All three are FIXED upstream, so all
-# three are now expected to report VERIFICATION SUCCESSFUL. A failure here means
-# a regression in ESBMC, or an ESBMC older than the fixes.
-#   #6183 (OM gaps)          -> fixed by #6190
-#   #6184 (GOTO-convert SIGABRT) -> fixed by #6195
+# Reproducers filed against esbmc/esbmc.
+#   #6183 (OM gaps)              -> FIXED by #6190, expect SUCCESSFUL
+#   #6184 (GOTO-convert SIGABRT) -> FIXED by #6195, expect SUCCESSFUL
+#   #6199 (basic_string ptr+len) -> STILL OPEN, expect FAILED
+# A verdict flip on any of these means an ESBMC regression, an ESBMC older than
+# the fixes, or -- for #6199 -- that the fix has landed and the harness
+# workarounds described in REPORT.md can be reverted.
 # ---------------------------------------------------------------------------
 repros: model | $(RESULTS)
 	@echo "== OM: missing <type_traits> members (#6183, fixed) =="
@@ -173,6 +175,12 @@ repros: model | $(RESULTS)
 	@echo "== OM: unique_ptr operator=(nullptr_t) (#6183, fixed) =="
 	-$(ESBMC) $(ESBMC_STD) esbmc_bug_repros/om_unique_ptr_nullptr_assign.cpp 2>&1 \
 	    | tail -4 | tee $(RESULTS)/repro_uniqptr.log
+	@echo "== OM: basic_string ptr+len ctor (#6199, STILL OPEN -> expect FAILED) =="
+	-$(ESBMC) $(ESBMC_STD) esbmc_bug_repros/om_string_ptr_len_ctor.cpp 2>&1 \
+	    | tail -4 | tee $(RESULTS)/repro_string_ptr_len.log
+	@echo "== crash: placement new with no initializer (minimal, #6184, fixed) =="
+	-$(ESBMC) $(ESBMC_STD) esbmc_bug_repros/placement_new_no_init.cpp 2>&1 \
+	    | tail -4 | tee $(RESULTS)/repro_placement_new.log
 	@echo "== crash: GOTO conversion of Array<unsigned char> (#6184, fixed) =="
 	-$(ESBMC) $(ESBMC_STD) $(ESBMC_DEFS) -Istubs -Imodel/include \
 	    esbmc_bug_repros/crash_goto_convert_array.cpp \

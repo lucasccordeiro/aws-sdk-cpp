@@ -23,24 +23,41 @@ Both were **confirmed with a concrete reproducer under AddressSanitizer**, not
 merely predicted. Neither is an artefact of an under-constrained harness — see
 "Is it real?" below.
 
-**Both are now independently confirmed by ESBMC as well.** The frontend blockers
-described in the original version of this report were fixed upstream
-([#6190](https://github.com/esbmc/esbmc/pull/6190) closing
-[#6183](https://github.com/esbmc/esbmc/issues/6183), and
-[#6195](https://github.com/esbmc/esbmc/pull/6195) closing
-[#6184](https://github.com/esbmc/esbmc/issues/6184)), and the harnesses in this
-directory now run:
+ESBMC's C++ frontend **did not originally ingest the target**. Eight distinct
+gaps in its C++ operational model were found and worked around, after which
+ESBMC **aborted during GOTO conversion** on `Aws::Utils::Array<unsigned char>`.
+Details in "ESBMC frontend results".
+
+Both blockers were filed upstream and both are now fixed: **#6183 is closed** by
+[PR #6190](https://github.com/esbmc/esbmc/pull/6190), and **#6184's cause was
+located** — placement new with no initializer — and fixed by
+[PR #6195](https://github.com/esbmc/esbmc/pull/6195) (both merged 2026-07-19).
+
+A third OM defect was then found by running the harnesses:
+[#6199](https://github.com/esbmc/esbmc/issues/6199), a spurious
+`basic_string overflow` raised before `Decode` is even reached. It is **worked
+around in the harnesses** rather than blocking them — see "Blocked again, one
+layer up". All three are tracked in [ESBMC_FIX_PLAN.md](ESBMC_FIX_PLAN.md).
+
+**With those in place, both defects are now independently confirmed by ESBMC**,
+no longer resting on AddressSanitizer alone:
 
 | Run | Verdict |
 |---|---|
 | B-1, concrete `"AAAA="` | `VERIFICATION FAILED` — `assertion GetItem`, `index < m_length` violated, after `allocationSize = 2` |
 | B-1, symbolic, RFC 4648 alphabet only | `VERIFICATION FAILED` — same property |
 | B-2, concrete `\xFF\xFF\xFF\xFF` | `VERIFICATION FAILED` — `dereference failure: access to object out of bounds` at `Base64.cpp:103` |
+| B-2, symbolic, unconstrained bytes | `VERIFICATION FAILED` — same property, same line |
 
-The symbolic alphabet-constrained run is the stronger result: it says the
-overflow follows from the length arithmetic itself, over *every* input of length
-< 7 drawn from the base64 alphabet, not just the three hand-picked strings ASan
-was pointed at.
+The two symbolic modes separate the defects cleanly: constrained to the base64
+alphabet the harness finds B-1, and with bytes unconstrained it finds B-2 first,
+since a high-bit byte is reachable sooner than the length arithmetic.
+
+The alphabet-constrained run is the stronger result: it says the overflow
+follows from the length arithmetic itself, over *every* input of length < 7
+drawn from the base64 alphabet, not just the three hand-picked strings ASan was
+pointed at. That B-2 falls out of the unconstrained mode without being asked for
+is the corresponding statement for the sign-extension defect.
 
 ⚠️ **`--unwind` is load-bearing.** `Base64::Base64()` fills a 256-entry decoding
 table via `memset(256)` plus a 64-iteration loop. Under a small `--unwind` those
@@ -309,41 +326,49 @@ no-custom-memory-system path that a stock SDK build takes.
 
 With those, **GCC compiles the TU cleanly.** Everything below is ESBMC-specific.
 
-### Operational-model gaps (7)
+### Operational-model gaps (8)
 
-| # | Missing from ESBMC's C++ OM | Used at | Worked around by |
+| # | Missing from ESBMC's C++ OM | Used at | Status |
 |---|---|---|---|
-| 1 | `std::size_t` not visible via `<cstdlib>` | `MemorySystemInterface.h:40` | shim includes `<cstddef>` first |
-| 2 | `std::is_class` | `AWSMemory.h:132` | shim, via `__is_class` builtin |
-| 3 | `std::is_polymorphic` | `AWSMemory.h:100,112` | shim, via `__is_polymorphic` |
-| 4 | `std::is_trivially_default_constructible` | `AWSMemory.h:307,315` | shim, via `__is_trivially_constructible` |
-| 5 | `std::is_trivially_destructible` | `AWSMemory.h:138` | shim, via `__is_trivially_destructible` |
-| 6 | `std::unique_ptr::operator=(nullptr_t)` and `unique_ptr(nullptr_t)` | `Array.h:45,137` | **patched ESBMC's OM** (cannot be fixed externally) |
-| 7 | `std::basic_string`: `const operator[]`, `push_back`, `reserve` | `Base64.cpp:55,73-76,133-135` | **patched ESBMC's OM** |
-| 8 | `std::shared_ptr` / `allocate_shared` — absent entirely | `AWSAllocator.h:105,117` | parse-only declaration in the shim |
+| 1 | `std::size_t` not visible via `<cstdlib>` | `MemorySystemInterface.h:40` | **fixed upstream** (#6190) |
+| 2 | `std::is_class` | `AWSMemory.h:132` | **fixed upstream** (#6190) |
+| 3 | `std::is_polymorphic` | `AWSMemory.h:100,112` | **fixed upstream** (#6190) |
+| 4 | `std::is_trivially_default_constructible` | `AWSMemory.h:307,315` | **fixed upstream** (#6190) |
+| 5 | `std::is_trivially_destructible` | `AWSMemory.h:138` | **fixed upstream** (#6190) |
+| 6 | `std::unique_ptr::operator=(nullptr_t)` and `unique_ptr(nullptr_t)` | `Array.h:45,137` | **fixed upstream** (#6190) |
+| 7 | `std::basic_string`: `const operator[]`, `push_back`, `reserve` | `Base64.cpp:55,73-76,133-135` | **fixed upstream** (#6190) |
+| 8 | `std::shared_ptr` / `allocate_shared` — absent entirely | `AWSAllocator.h:105,117` | **still open** — parse-only declaration in the shim |
 
-Gaps 2-5 and 8 were handled in `stubs/esbmc_compat.h` without touching ESBMC.
-Gaps 6 and 7 are member functions of OM types and **cannot** be fixed from
-outside, so `src/cpp/library/{memory,string}` were patched locally; those
-patches are the basis of the upstream issue.
+Gaps 1-7 were closed by [PR #6190](https://github.com/esbmc/esbmc/pull/6190),
+merged 2026-07-19, which closed issue #6183. Gaps 6 and 7 are member functions
+of OM types and could not have been fixed from outside the tool at all, which
+is why they drove the upstream issue.
 
-**Current status:** gaps 1-7 are fixed upstream by #6190. Consequently the shim's
-traits block is now a *liability* — re-supplying `is_class` and friends on a
-current ESBMC is a redefinition error — so the Makefile no longer passes
-`-D ESBMC_OM_MISSING_TRAITS`, and the shim's `shared_ptr` half was moved outside
-that guard. **Gap 8 remains open**: `std::shared_ptr` / `std::allocate_shared`
-are still absent from `src/cpp/library`, so the parse-only declaration in the
-shim is still required.
+That fix was **confirmed end-to-end here**: with `stubs/esbmc_compat.h`
+entirely disabled, the only parse errors that remain are `shared_ptr` and
+`allocate_shared`. The shim is correspondingly down to `shared_ptr` alone, and
+the Makefile gate was renamed `ESBMC_OM_MISSING_TRAITS` →
+`ESBMC_OM_MISSING_SHARED_PTR`. The rename was forced rather than cosmetic:
+against a #6190 build, shimming the traits is a redefinition error.
 
-Notable: ESBMC's clang frontend already accepts the `__is_class` /
-`__is_polymorphic` / `__is_trivially_*` builtins, so gaps 2-5 are a few lines
-each to fix properly in the OM.
+Gap 8 was deliberately left out of #6190 — reference counting, aliasing
+constructors, `weak_ptr` and `enable_shared_from_this` need a real model, not a
+header addition. It is the last thing standing between this repo and an
+unshimmed run.
 
-Also observed but not blocking: `std::basic_string::size()` returns `int`
-rather than `size_type`, and OM `unique_ptr`'s destructor is `#if 0`-ed out
-("TODO: fix remove goto sideeffect"), meaning the model never releases. The
-latter makes `--memory-leak-check` results meaningless against this model —
-worth knowing before trusting a leak verdict on any C++ target.
+A ninth gap surfaced only once the crash was fixed and the harnesses could
+actually run — `basic_string(const char*, size_t)` asserting `n < strlen(s)`,
+described under "Blocked again, one layer up" below. It is a false positive
+rather than a missing member, which is why it could not be found until
+something reached it.
+
+Also observed but not blocking, and **still unfixed**:
+`std::basic_string::size()` returns `int` rather than `size_type`, and OM
+`unique_ptr`'s destructor is `#if 0`-ed out ("TODO: fix remove goto
+sideeffect"), meaning the model never releases. The latter makes
+`--memory-leak-check` results meaningless against this model — worth knowing
+before trusting a leak verdict on any C++ target. This repo therefore no longer
+passes `--memory-leak-check` at all.
 
 ### Crash: GOTO conversion of `Array<unsigned char>`
 
@@ -364,66 +389,191 @@ Fatal glibc error: tpp.c:83 (__pthread_tpp_change_priority): assertion failed: .
 
 Four different glibc/pthread failure modes from one deterministic input is the
 signature of memory corruption inside ESBMC scribbling over glibc's thread
-structures. Ruled out as causes: the input is single-threaded; the machine had
-177 GB free and 797 of 1.49 M threads in use; no `--memlimit` or
-`--enable-keep-alive` was passed, so ESBMC's own `setrlimit`/thread paths are
-not entered; peak RSS was ~100 MB. Raising the stack to unlimited converts the
-abort into a **hang with zero CPU time** — i.e. a deadlock rather than a fix.
+structures.
 
-Bisection: keeping `Array<T>` and dropping `CryptoBuffer` from `Array.h` makes
-the same input convert and verify successfully. `scripts/make_model_headers.sh`
-does that mechanically, which is enough to get past the *include*, but
-constructing an `Array<unsigned char>` still crashes. A self-contained
-reduction (no AWS headers) was attempted and did not reproduce; the filed issue
-therefore points at this repository for exact reproduction.
+**Root cause: an out-of-bounds read on a one-operand `comma` expression,
+triggered by placement new with no initializer.**
 
-**Resolution.** Fixed by [#6195](https://github.com/esbmc/esbmc/pull/6195). The
-root cause was not `irept` refcounting but an out-of-bounds vector read on a
-malformed expression: placement new of a non-class type with no initializer
-(`new (p) int;`) built a one-operand `comma` node, and downstream `op1()`
-accesses read past the end of the operand vector. Reached here via
-`AWSMemory.h:185`, `new (pointerToT + i) T;` with `T = unsigned char`. Because
-the OOB read landed on whatever heap bytes were adjacent, the abort site — and
-so the message — varied with allocation layout, which is what made it look like
-nondeterministic corruption.
-
-`crash_goto_convert_array.cpp` now reports `VERIFICATION SUCCESSFUL`, and the
-symbolic harnesses run. B-1 and B-2 no longer rest on ASan alone.
-
-### Still open: `basic_string(const char*, size_t)`
-
-One further OM defect was found while getting the harnesses running, filed as
-[esbmc/esbmc#6199](https://github.com/esbmc/esbmc/issues/6199). The constructor
-asserts `n < strlen(s)`, but [string.cons] requires only that `[s, s + n)` be a
-valid range — `n` may equal or exceed `strlen(s)`, and the range may contain
-embedded nulls. The idiomatic exact-length form therefore fails inside the
-constructor:
+`Aws::NewArray` (`AWSMemory.h:185`) constructs elements with
 
 ```cpp
-Aws::String input("AAAA=", 5);   // basic_string overflow
+new (pointerToT + i) T;      // placement new, NO initializer
 ```
 
-The harnesses work around it by keeping one spare byte in the backing array so
-`strlen(raw) > len` always holds — hence `__ESBMC_assume(len < MAXLEN)` rather
-than `<=` in `base64_decode_harness.cpp`, and the trailing filler byte in the
-string literals in `base64_decode_concrete.cpp`. Those fillers are **not** part
-of the input under test; the explicit length excludes them. Revert both once
-#6199 lands.
+For a non-class `T`, `new (p) T;` default-initializes, which for such a type
+performs *no* initialization at all ([dcl.init.general]). Clang therefore
+attaches **no initializer child** to the `CXXNewExpr`, and ESBMC builds a
+`comma` expression holding a single operand. `clang_c_adjust::adjust_comma`
+(`src/clang-c-frontend/clang_c_adjust_expr.cpp:1589`) then does
+
+```cpp
+expr.type() = expr.op1().type();   // unguarded op1() on a 1-operand expr
+```
+
+reading one past the end of the operand vector.
+
+The full chain is `ByteBuffer b(3)` → `Array(size_t)` → `MakeUniqueArray<T>` →
+`NewArray<T>` → `new (pointerToT + i) T;`.
+
+The differential is one character wide:
+
+| Expression | Result |
+|---|---|
+| `new (p) int;` | crash |
+| `new (p) int();` | `VERIFICATION SUCCESSFUL` |
+
+**Correction to an earlier diagnosis.** This was previously reported here as a
+*use-after-free of `irept::dt`*, on the strength of a gdb session showing
+`irept::detatch` (`src/util/irep.cpp:48`) locking a `dt` with `ref_count == 0`,
+an invalid mutex `__kind`, and an `_M_color` enum holding a pointer. The
+observations were accurate; the interpretation was not. Those bytes are not
+recycled heap — they are simply **out of bounds**. `ref_count == 0` on a
+live-looking `irept` reads as "freed", but is equally consistent with "never
+was an `irept`".
+
+The OOB reading explains what the UAF theory had to hand-wave: no race is
+needed (`info threads` showed one thread), no stack exhaustion is implied (44
+frames), and the run-to-run variation in glibc's abort message follows from
+*which* garbage lands in `__kind` and sends glibc down the
+priority-inheritance path (`__futex_lock_pi64`). `ulimit -s unlimited` changing
+the symptom was, as suspected, a layout perturbation rather than a fix. Also
+ruled out earlier and still ruled out: resource exhaustion (177 GB free, 797 of
+1.49 M threads, peak RSS ~100 MB) and ESBMC's own `setrlimit`/thread paths
+(neither `--memlimit` nor `--enable-keep-alive` was passed).
+
+**Reduction.** The self-contained reduction that earlier attempts failed to
+find now exists: `esbmc_bug_repros/placement_new_no_init.cpp`, which needs no
+AWS headers, no shim and no `-I` flags. `crash_goto_convert_array.cpp` is kept
+as the original end-to-end trigger.
+
+Bisection (recorded for completeness): keeping `Array<T>` and dropping
+`CryptoBuffer` from `Array.h` makes the same input convert and verify
+successfully — `scripts/make_model_headers.sh` does that mechanically — but
+constructing an `Array<unsigned char>` still crashes, because that is the path
+that reaches `NewArray`.
+
+**Fixed** by [PR #6195](https://github.com/esbmc/esbmc/pull/6195) (merged
+2026-07-19): the C++ frontend no longer emits a `comma` for an
+initializer-less `CXXNewExpr` — the value of `new (p) T;` is just the placement
+address — and `adjust_comma` gains an explicit `operands().size() == 2` assert
+so that any other producer of a malformed comma fails loudly instead of reading
+out of bounds. Two regression tests ship with it under
+`regression/esbmc-cpp/cpp/placement_new_no_init{,_fail}/`.
+
+Verified here against a build carrying both #6190 and #6195:
+`placement_new_no_init.cpp` returns `VERIFICATION SUCCESSFUL`, and so does
+`make smoke` — the acceptance criterion this repo set for the crash, since it
+means `Aws::Utils::Array<unsigned char>` now converts and symexes.
+
+`crash_goto_convert_array.cpp` also converts now, and reaches the solver. Left
+to itself it reports `VERIFICATION FAILED` for an unrelated reason:
+`Aws::NewArray` (`AWSMemory.h:166-171`) does not check `Malloc`'s result before
+casting and placement-newing into it, so on the allocation-failure path
+`Array::operator[]` dereferences null. That is an allocation-failure property,
+not the crash and not B-1 — most verification setups assume allocation
+succeeds, so the Makefile passes `--force-malloc-success` and the reproducer
+reports `VERIFICATION SUCCESSFUL`. Recorded here so that neither verdict is
+mistaken for the crash persisting.
+
+### One layer up: `basic_string(const char*, size_t)` — filed as #6199
+
+With the crash gone, `make esbmc` runs the symbolic harnesses for the first
+time. Both modes initially terminated with `VERIFICATION FAILED` — but on a
+**spurious property inside ESBMC's own string model**, not inside `Decode`:
+
+```
+Violated property:
+  file <om>/string line 1132 function basic_string
+  basic_string overflow
+  n::1 < return_value$_strlen$1
+```
+
+The OM's two-argument constructor (`src/cpp/library/string:1132`) asserts:
+
+```cpp
+__ESBMC_assert(n < strlen(s), "basic_string overflow");
+```
+
+That is wrong twice over. [string.cons] gives this constructor exactly one
+precondition — "`[s, s + n)` is a valid range" — and effects "constructs an
+object whose initial value is the range `[s, s + n)`". So:
+
+* **The operator is wrong.** `n == strlen(s)` is the canonical case, and the
+  strict `<` rejects it. Minimal reproducer, no AWS headers:
+
+  ```cpp
+  std::string s("abc", 3);   // ESBMC: "basic_string overflow"
+  ```
+
+* **The premise is wrong.** `s` need not be null-terminated at all, so
+  `strlen(s)` is not part of the precondition and is itself undefined behaviour
+  on a valid non-terminated argument. A faithful model cannot be phrased in
+  terms of `strlen`.
+
+Minor, but in the same line: the `strlen(s)` assert runs *before* the
+`s != NULL` assert below it, so a null argument is dereferenced before it is
+checked.
+
+The harness trips this because `Aws::String input(raw, len)` passes a `len`
+that can equal `strlen(raw)` — which is exactly what the constructor is for.
+It is a **false positive**, so it does not threaten soundness.
+
+Filed as [esbmc/esbmc#6199](https://github.com/esbmc/esbmc/issues/6199), which
+also reports two further defects in the same constructor found while reducing
+it: the copy loop stops at embedded nulls while `_size` is already `n`, so a
+value containing one is silently truncated while `length()` still reports `n`
+(confirmed by removing the assertion locally and re-running); and the `strlen`
+assertion is evaluated before the `s != NULL` check below it.
+
+**Worked around, not blocking.** Unlike the crash, this one can be side-stepped
+from the harness. Two constraints are needed, both marked in the source:
+
+* `__ESBMC_assume(len < MAXLEN)` rather than `<=` in
+  `base64_decode_harness.cpp`, plus the trailing filler byte in the string
+  literals of `base64_decode_concrete.cpp`, so the backing array always holds a
+  spare byte. Those filler bytes are **not** part of the input under test — the
+  explicit length excludes them.
+* `__ESBMC_assume(c != '\0')` on each symbolic byte. A spare byte alone is not
+  enough once bytes are unconstrained: an interior NUL shortens `strlen(raw)`
+  and trips the same bogus precondition. Excluding `'\0'` is the narrowest
+  constraint that keeps the unconstrained mode meaningful — every other byte
+  value is still explored, which is why B-2 still falls out of it.
+
+Revert all of these once #6199 lands.
+
+**Consequence for this exercise:** the symbolic proof is obtained. See the
+verdict table in the Summary. B-1 and B-2 no longer rest on the ASan
+reproducers alone; the alphabet-constrained run bounds the set of triggering
+inputs rather than merely exhibiting three of them.
+
+Order of blockers, for the record: OM members missing (#6183, fixed) → GOTO
+conversion crash (#6184, fixed) → spurious `basic_string overflow` (#6199, open
+but worked around). Each was only discoverable once the previous one was
+cleared, which is the ordinary shape of bringing a real codebase under a
+verifier for the first time.
 
 ### Issues filed against esbmc/esbmc
 
-* **[esbmc/esbmc#6183](https://github.com/esbmc/esbmc/issues/6183)** — *CLOSED,
-  fixed by [#6190](https://github.com/esbmc/esbmc/pull/6190).* C++ OM missing
-  `type_traits`, `unique_ptr`, `basic_string` and `shared_ptr` members.
-  Reproducers: `esbmc_bug_repros/om_*.cpp`, both now `VERIFICATION SUCCESSFUL`.
-  `std::shared_ptr` was out of scope for that fix and is still missing.
-* **[esbmc/esbmc#6184](https://github.com/esbmc/esbmc/issues/6184)** — *CLOSED,
-  fixed by [#6195](https://github.com/esbmc/esbmc/pull/6195).* SIGABRT during
-  GOTO conversion on `ByteBuffer`. Reproducer:
-  `esbmc_bug_repros/crash_goto_convert_array.cpp`, now `VERIFICATION SUCCESSFUL`.
-* **[esbmc/esbmc#6199](https://github.com/esbmc/esbmc/issues/6199)** — *OPEN.*
-  `basic_string(const char*, size_t n)` asserts `n < strlen(s)`, rejecting legal
-  input, and truncates at embedded nulls. See above.
+* **[esbmc/esbmc#6183](https://github.com/esbmc/esbmc/issues/6183)** —
+  **CLOSED.** C++ OM missing `type_traits`, `unique_ptr`, `basic_string` and
+  `shared_ptr` members. Reproducers: `esbmc_bug_repros/om_*.cpp`. Fixed by
+  [PR #6190](https://github.com/esbmc/esbmc/pull/6190), merged 2026-07-19, with
+  five regression tests under `regression/esbmc-cpp/cpp/github_6183*`.
+  `shared_ptr` was deliberately excluded and needs its own issue.
+* **[esbmc/esbmc#6184](https://github.com/esbmc/esbmc/issues/6184)** —
+  **CLOSED.** SIGABRT during GOTO conversion on `ByteBuffer`, with
+  varying glibc pthread assertions. Cause: unguarded `op1()` in `adjust_comma`
+  against the one-operand `comma` that placement-new-without-initializer
+  produces. Fixed by [PR #6195](https://github.com/esbmc/esbmc/pull/6195).
+  Reproducers: `esbmc_bug_repros/placement_new_no_init.cpp` (minimal, no AWS
+  headers) and `esbmc_bug_repros/crash_goto_convert_array.cpp` (end-to-end;
+  needs #6190 to get far enough to crash).
+* **[esbmc/esbmc#6199](https://github.com/esbmc/esbmc/issues/6199)** — **OPEN.**
+  `basic_string(const char*, size_t)` asserts `n < strlen(s)`, rejecting the
+  canonical `std::string("abc", 3)` and contradicting [string.cons]; the copy
+  loop also truncates at embedded nulls, and `strlen` is evaluated before the
+  null check. Reproducer: `esbmc_bug_repros/om_string_ptr_len_ctor.cpp`.
+  Worked around in the harnesses, so it no longer blocks the proof.
 
 ---
 
@@ -433,14 +583,18 @@ of the input under test; the explicit length excludes them. Revert both once
 make confirm  # ESBMC on the two named defect inputs   -> both VERIFICATION FAILED
 make esbmc    # ESBMC over the symbolic harnesses      -> VERIFICATION FAILED
 make smoke    # ESBMC frontend/OM smoke test           -> VERIFICATION SUCCESSFUL
-make repros   # the three filed ESBMC reproducers      -> all VERIFICATION SUCCESSFUL
+make repros   # the filed ESBMC reproducers            -> see below
 make asan     # independent ASan cross-check
 ```
 
 `VERIFICATION FAILED` from `confirm` and `esbmc` is the expected, desired result
-— it is the confirmation. `repros` reporting `SUCCESSFUL` is likewise expected:
-those reproduce ESBMC bugs that are now fixed, so a failure there means an ESBMC
-regression or a build predating #6190/#6195.
+— it is the confirmation.
+
+Under `repros`, the four reproducers for the two **fixed** issues (#6183, #6184)
+are expected to report `SUCCESSFUL`; a failure there means an ESBMC regression
+or a build predating #6190/#6195. The fifth, `om_string_ptr_len_ctor.cpp`, is
+expected to report `FAILED` because #6199 is still open — when it starts passing,
+the harness workarounds described above can be reverted.
 
 The ESBMC targets need a build at or after those two fixes; `make asan` requires
 only a C++ compiler. Both were last run against ESBMC master `d0bb9881f2` on

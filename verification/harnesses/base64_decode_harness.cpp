@@ -67,6 +67,16 @@ int main()
   for (size_t i = 0; i < (size_t)MAXLEN; ++i)
   {
     const char c = nondet_char();
+
+    /* Second half of the esbmc/esbmc#6199 workaround. Keeping one spare byte in
+     * raw[] only guarantees strlen(raw) > len while no interior byte is NUL; an
+     * unconstrained NUL shortens strlen and trips the OM's bogus
+     * n < strlen(s) precondition before Decode is reached. Excluding '\0' is
+     * the narrowest constraint that keeps ANY_BYTE meaningful -- every other
+     * byte value, high-bit ones included, is still explored, so this does not
+     * weaken the B-2 result. Remove once #6199 lands. */
+    __ESBMC_assume(c != '\0');
+
 #ifdef HARNESS_MODE_ALPHABET
     /* RFC 4648 base64 alphabet plus the pad character. Note this deliberately
      * still permits '=' at *any* position -- a caller cannot police interior
@@ -83,9 +93,10 @@ int main()
   const Aws::String input(raw, len);
   const Aws::Utils::Base64::Base64 codec;
 
-  /* The property is memory safety of the call itself: ESBMC's --bounds-check
-   * and --pointer-check watch every buffer[...] store inside Decode, and
-   * Array::GetItem's own assert(index < m_length) fires first when enabled.
+  /* The property is memory safety of the call itself: ESBMC's array-bounds and
+   * pointer checks (on by default; only --no-bounds-check / --no-pointer-check
+   * exist) watch every buffer[...] store inside Decode, and Array::GetItem's
+   * own assert(index < m_length) fires first when enabled.
    * No postcondition is asserted here on purpose -- a spurious functional
    * assertion would muddy a genuine memory-safety counterexample. */
   const Aws::Utils::ByteBuffer out = codec.Decode(input);
