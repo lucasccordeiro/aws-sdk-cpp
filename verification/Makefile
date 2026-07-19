@@ -7,10 +7,15 @@
 #   make model      - regenerate model/ from pristine vendor/
 #   make clean
 #
-# STATUS: the `esbmc` targets do not complete on this toolchain -- ESBMC 8.4.0
-# aborts during GOTO conversion on Aws::Utils::Array<unsigned char>. See
-# REPORT.md and esbmc_bug_repros/. The `asan` target is what actually
+# STATUS: the `esbmc` targets do not complete -- ESBMC aborts during GOTO
+# conversion on Aws::Utils::Array<unsigned char>. Cause located (esbmc/esbmc#6184):
+# placement new with no initializer yields a one-operand "comma", and
+# adjust_comma reads op1() out of bounds. Minimal reproducer:
+# esbmc_bug_repros/placement_new_no_init.cpp. The `asan` target is what actually
 # discharges the memory-safety claims today.
+#
+# Requires esbmc/esbmc#6190 (merged 2026-07-19) for the OM members; against an
+# older build these targets stop at a parse error instead.
 
 ESBMC       ?= esbmc
 CXX         ?= g++
@@ -24,8 +29,13 @@ INCLUDES    := -Istubs -Ivendor -Imodel/include
 ASAN_INC    := -Istubs -Ivendor -Ivendor/include
 
 ESBMC_STD   := --std c++11
-ESBMC_DEFS  := -D ESBMC_OM_MISSING_TRAITS
-ESBMC_PROPS := --memory-leak-check --bounds-check --pointer-check
+ESBMC_DEFS  := -D ESBMC_OM_MISSING_SHARED_PTR
+# Array-bounds and pointer checks are ON BY DEFAULT in current ESBMC -- only
+# --no-bounds-check / --no-pointer-check exist. The old affirmative spellings
+# were removed and are now hard errors, so do not re-add them.
+# --memory-leak-check is deliberately NOT passed: the OM's unique_ptr has its
+# destructor #if 0-ed out, so a leak verdict against this model is meaningless.
+ESBMC_PROPS :=
 ESBMC_BOUND := --unwind $(UNWIND) --no-unwinding-assertions
 
 MEMSTUB     := stubs/aws_memory_stub.cpp
@@ -132,6 +142,12 @@ repros: model | $(RESULTS)
 	@echo "== OM: unique_ptr operator=(nullptr_t) =="
 	-$(ESBMC) $(ESBMC_STD) esbmc_bug_repros/om_unique_ptr_nullptr_assign.cpp 2>&1 \
 	    | tail -4 | tee $(RESULTS)/repro_uniqptr.log
+	@echo "== OM: basic_string(const char*, size_t) rejects n == strlen(s) =="
+	-$(ESBMC) $(ESBMC_STD) esbmc_bug_repros/om_string_ptr_len_ctor.cpp 2>&1 \
+	    | tail -4 | tee $(RESULTS)/repro_string_ptr_len.log
+	@echo "== crash: placement new with no initializer (minimal, #6184) =="
+	-$(ESBMC) $(ESBMC_STD) esbmc_bug_repros/placement_new_no_init.cpp 2>&1 \
+	    | tail -4 | tee $(RESULTS)/repro_placement_new.log
 	@echo "== crash: GOTO conversion of Array<unsigned char> =="
 	-$(ESBMC) $(ESBMC_STD) $(ESBMC_DEFS) -Istubs -Imodel/include \
 	    esbmc_bug_repros/crash_goto_convert_array.cpp \

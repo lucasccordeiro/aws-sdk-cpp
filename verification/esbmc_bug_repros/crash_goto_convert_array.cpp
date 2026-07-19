@@ -14,15 +14,22 @@
  * https://github.com/lucasccordeiro/aws-sdk-cpp :
  *
  *   $ ./scripts/make_model_headers.sh
- *   $ esbmc --std c++11 -D ESBMC_OM_MISSING_TRAITS -Istubs -Imodel/include \
+ *   $ esbmc --std c++11 -D ESBMC_OM_MISSING_SHARED_PTR -Istubs -Imodel/include \
  *       esbmc_bug_repros/crash_goto_convert_array.cpp \
  *       --unwind 4 --no-unwinding-assertions
  *   ... Converting
  *   <one of the aborts above>, exit 134
  *
- * Requires the local OM patches for unique_ptr(nullptr_t) and
- * basic_string::{operator[] const, push_back, reserve}; without them this stops
- * at a parse error before reaching the crash.
+ * Requires esbmc/esbmc#6190 (the unique_ptr(nullptr_t), basic_string and
+ * type_traits OM additions); without it this stops at a parse error before
+ * reaching the crash.
+ *
+ * ROOT CAUSE, since located: placement new with no initializer. Array's
+ * constructor does `new (base + i) T;`, and clang attaches no initializer child
+ * to such a CXXNewExpr, so clang_c_adjust::adjust_comma reads op1() of a
+ * one-operand expression -- out of bounds. See the minimal, AWS-free reproducer
+ * in placement_new_no_init.cpp; this file is kept as the original end-to-end
+ * trigger.
  *
  * Raising the stack (ulimit -s unlimited) turns the abort into a hang with zero
  * CPU time rather than fixing it. Not resource exhaustion: 177 GB free, 797 of

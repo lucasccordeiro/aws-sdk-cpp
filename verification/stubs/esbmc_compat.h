@@ -5,70 +5,35 @@
  * SDK itself stays byte-for-byte verbatim -- no #ifdefs, no edited headers, no
  * stubbed-out Array.h. Everything the harnesses verify is real upstream code.
  *
- * Two independent gaps in ESBMC 8.4.0's C++ OM block aws-cpp-sdk-core:
+ * ONE gap in ESBMC's C++ OM still blocks aws-cpp-sdk-core: std::shared_ptr.
  *
- *  (1) src/cpp/library/type_traits lacks std::is_class, std::is_polymorphic and
- *      std::is_trivially_default_constructible. AWSMemory.h dispatches on all
- *      three (lines 100, 112, 132, 307, 315). ESBMC's clang frontend *does*
- *      accept the corresponding __is_class / __is_polymorphic /
- *      __is_trivially_constructible builtins, so the traits are recoverable
- *      here and the upstream fix is a handful of lines in that OM header.
- *
- *  (2) MemorySystemInterface.h says `std::size_t` while including only
- *      <cstdlib>. libstdc++ leaks std::size_t through <cstdlib>; ESBMC's OM
- *      <cstdlib> does not. Pulling <cstddef> first (which ESBMC's OM *does*
- *      define std::size_t in) closes it.
+ * The traits (std::is_class, std::is_polymorphic,
+ * std::is_trivially_default_constructible, std::is_trivially_destructible) and
+ * std::size_t-via-<cstdlib> were fixed upstream by esbmc/esbmc#6190, which
+ * closed esbmc/esbmc#6183. Shimming them here is now a *redefinition error*
+ * against the OM, so those blocks are gone rather than merely disabled.
  *
  * Reported upstream: see verification/esbmc_bug_repros/.
  */
 
 #pragma once
 
-/* Gap (2): make std::size_t visible before any AWS header is parsed. */
-#include <cstddef>
+/* ESBMC 8.4.0 predefines no identifying macro (neither __ESBMC__ nor __ESBMC),
+ * so the Makefile passes -D ESBMC_OM_MISSING_SHARED_PTR on the ESBMC command
+ * line only. Under g++/libstdc++ -- used for the ASan cross-check and by
+ * clangd -- std::shared_ptr already exists and redefining it is an error, so
+ * the block below must stay dark there. Drop the -D once ESBMC's OM grows a
+ * real shared_ptr; nothing else in the tree changes. */
+#ifdef ESBMC_OM_MISSING_SHARED_PTR
 
-/* Gap (1): supply the three missing traits on top of the clang builtins that
- * ESBMC's frontend already understands.
- *
- * ESBMC 8.4.0 predefines no identifying macro (neither __ESBMC__ nor __ESBMC),
- * so the Makefile passes -D ESBMC_OM_MISSING_TRAITS on the ESBMC command line
- * only. Under g++/libstdc++ -- used for the ASan cross-check and by clangd --
- * these traits already exist and redefining them is an error, so the block
- * below must stay dark there. Drop the -D once ESBMC's OM grows the traits;
- * nothing else in the tree changes. */
-#ifdef ESBMC_OM_MISSING_TRAITS
-
-#include <type_traits>
-
-namespace std
-{
-template <typename T>
-struct is_class : public integral_constant<bool, __is_class(T)>
-{
-};
-
-template <typename T>
-struct is_polymorphic : public integral_constant<bool, __is_polymorphic(T)>
-{
-};
-
-template <typename T>
-struct is_trivially_default_constructible
-  : public integral_constant<bool, __is_trivially_constructible(T)>
-{
-};
-
-template <typename T>
-struct is_trivially_destructible
-  : public integral_constant<bool, __is_trivially_destructible(T)>
-{
-};
-} // namespace std
-
-/* Gap (3): ESBMC 8.4.0's C++ OM has no std::shared_ptr at all (grep the whole
- * of src/cpp/library -- the only hit is a boost config header). AWSAllocator.h
- * names std::shared_ptr<T> as the return type of the Aws::MakeShared function
+/* ESBMC's OM has no std::shared_ptr at all (grep the whole of src/cpp/library
+ * -- the only hit is a boost config header). AWSAllocator.h names
+ * std::shared_ptr<T> as the return type of the Aws::MakeShared function
  * template and calls std::allocate_shared in its body.
+ *
+ * esbmc/esbmc#6190 left this out deliberately: reference counting, aliasing
+ * constructors, weak_ptr and enable_shared_from_this need a real model, not a
+ * header addition.
  *
  * SCOPE OF THIS MODEL -- read before reusing:
  * MakeShared is a *function template* that no codec harness ever instantiates,
@@ -117,4 +82,4 @@ template <typename T, typename Alloc, typename... Args>
 shared_ptr<T> allocate_shared(const Alloc &, Args &&...); /* no definition */
 } // namespace std
 
-#endif // ESBMC_OM_MISSING_TRAITS
+#endif // ESBMC_OM_MISSING_SHARED_PTR
