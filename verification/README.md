@@ -46,6 +46,7 @@ make esbmc    # symbolic memory-safety harnesses
 make smoke    # ESBMC frontend smoke test
 make repros   # the ESBMC bug reproducers
 make asan     # independent ASan cross-check; needs only GCC
+make testgen  # ESBMC counterexamples -> executable tests, replayed under ASan
 make model    # regenerate model/ from vendor/
 ```
 

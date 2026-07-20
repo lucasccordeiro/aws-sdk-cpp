@@ -53,6 +53,12 @@ The two symbolic modes separate the defects cleanly: constrained to the base64
 alphabet the harness finds B-1, and with bytes unconstrained it finds B-2 first,
 since a high-bit byte is reachable sooner than the length arithmetic.
 
+Both counterexamples have since been turned into **executable tests** with
+ESBMC's [CTest generation](https://esbmc.github.io/docs/c-cpp/ctest-gen/) and
+replayed against a native ASan build, where both crash — see "From
+counterexample to executable test" below. Neither defect now rests on reading a
+solver trace.
+
 The alphabet-constrained run is the stronger result: it says the overflow
 follows from the length arithmetic itself, over *every* input of length < 7
 drawn from the base64 alphabet, not just the three hand-picked strings ASan was
@@ -200,11 +206,39 @@ Real. Three independent reasons:
    precondition to violate.
 3. **It is reachable from a public utility API.** `Decode` is public, and is
    wrapped by `HashingUtils::Base64Decode` (`HashingUtils.cpp:40`), itself
-   public. Within the sparse checkout used here the concrete caller is
-   `PrecalculatedHash.cpp:15` (`Base64Decode(hash.c_str())`); generated service
-   clients were not checked out, so the full caller set upstream is wider than
-   what was verified here. Both `Base64::Decode` and `HashingUtils::Base64Decode`
-   are exported API that an SDK consumer may call on data of their choosing.
+   public. That wrapper is a bare pass-through — its whole body is
+   `return s_base64.Decode(encodedMessage);` — so it adds no validation
+   between an SDK consumer and the defect. Both are exported API that an SDK
+   consumer may call on data of their choosing.
+
+   **Correction — the one call site this report used to name is not a
+   caller.** Earlier revisions cited `PrecalculatedHash.cpp:15`
+   (`Base64Decode(hash.c_str())`) as the concrete in-tree caller. It is not.
+   That translation unit opens with `using namespace Aws::Crt;`, and the call
+   is *unqualified*. `HashingUtils::Base64Decode` is a static class member, so
+   unqualified lookup can never find it — `PrecalculatedHash` derives from
+   `Hash`, not from `HashingUtils`, and there is no using-declaration. The name
+   binds instead to the namespace-scope
+   `Aws::Crt::Base64Decode(const String&) -> Vector<uint8_t>`
+   (`aws/crt/Types.h:70`), i.e. the aws-c-common decoder, a different
+   implementation entirely. The next line settles it independently:
+   `decoded.data()` / `decoded.size()` are `Crt::Vector` members;
+   `Aws::Utils::ByteBuffer` exposes `GetUnderlyingData()` / `GetLength()`
+   (`Array.h:222,232`) and would not compile there.
+
+   The claim survives on reasons 1, 2 and the `HashingUtils.cpp:40` half of
+   this one — but the SDK-side caller set lives in the generated service
+   clients, which are **not** in this repo's 12-file sparse `vendor/`
+   checkout and were therefore never enumerated here. Treat "reachable from
+   public API" as established and "here is who calls it in practice" as
+   unverified.
+
+   Note on provenance: `HashingUtils.cpp`, `PrecalculatedHash.{h,cpp}` and
+   `aws/crt/Types.h` are all absent from `vendor/`, so none of these
+   references can be checked locally. They were verified by fetching each
+   file at the pinned commit `95988ca5` (aws-crt-cpp from `main`) and reading
+   the bodies. The earlier error came from confirming that a line of text
+   existed without confirming what the name on it bound to.
 
 The only way to call this "not a bug" is to posit an undocumented precondition
 that the input length is a multiple of 4 — which the function neither states
@@ -300,6 +334,96 @@ return blockCount * 3 - padding;
 
 Rejecting `len % 4 != 0` outright would also work and is arguably more correct
 for a strict RFC 4648 decoder, but is a behaviour change for existing callers.
+
+---
+
+## From counterexample to executable test
+
+A counterexample is a claim about the *model*. The question it leaves open is
+whether the input it names is real — whether a process fed exactly those bytes
+crashes. ESBMC's `--generate-ctest-testcase`
+([docs](https://esbmc.github.io/docs/c-cpp/ctest-gen/)) closes that gap: it
+emits `test_case.cpp` holding concrete `__VERIFIER_nondet_*` implementations
+that replay the counterexample's values in trace order. Linking those against a
+*native* ASan build of the same harness — no ESBMC, no operational model, real
+libstdc++ `std::string`, real allocator — executes the exact input the solver
+chose. `make testgen`.
+
+| Defect | Counterexample ESBMC chose | Native replay |
+|---|---|---|
+| **B-1** (alphabet mode) | `len = 5`, bytes `{121,121,47,120,61,...}` = **`"yy/x="`** | `heap-buffer-overflow`, WRITE at `Base64.cpp:115` |
+| **B-2** (unconstrained) | `len = 6`, bytes `{-128,61,61,-19,16,61}` — leading `0x80` | `SEGV`, READ at `Base64.cpp:103` |
+
+Both replays crash at the same source lines the symbolic runs indicted, and
+each prints the input it reconstructed (`replay: input=79792f783d len=5`) so
+the table above is checkable rather than asserted. Two things are worth drawing
+out:
+
+* **The solver picks the witness, not the test author.** `"yy/x="` is not in
+  the hand-written `ASAN_CASES` table. It is the same structural class as
+  `AAAA=` — length 5, one trailing pad — so the novelty is not the byte
+  values; it is that the alphabet-mode run *bounds the triggering set* and then
+  returns a member of it, rather than confirming three strings someone guessed.
+  That is the difference between a test suite and a proof.
+* **The harness assumptions are checked at replay time, not assumed.** Under
+  `ESBMC_REPLAY` every `__ESBMC_assume` becomes a hard `abort()` (not
+  `assert()` — the replay is built `-DNDEBUG` for release semantics, which
+  would compile `assert` out). So the B-1 replay would abort rather than crash
+  if the counterexample contained a byte outside the RFC 4648 alphabet.
+  Verified by tampering: substituting `0x01` for the first byte produces
+  `replay: assumption violated: (c >= 'A' && c <= 'Z') || ...` and no
+  overflow. The guard is live, so the crash is a genuine alphabet-only input.
+
+### What `make testgen` will and will not accept
+
+A confirmation target that cannot fail is decoration. This one fails unless all
+four hold, and each failure path was exercised rather than assumed:
+
+| Guard | Failure exercised by |
+|---|---|
+| A test case was generated at all (also kills the stale-artefact path — the case directory is `rm -rf`'d first) | `make testgen ESBMC=false` → `FAIL: no test case generated` |
+| The generated `char` array holds exactly `MAXLEN` entries | injected 8th entry → `FAIL: char array has 8 entries` |
+| No `replay: assumption violated` | tampered first byte → abort, no overflow |
+| Frame `#0` is the expected `Base64.cpp` line, not merely *some* crash | asserting line 999 → `FAIL: crashed away from Base64.cpp:999` |
+
+The third guard matters because `abort()` raises no `ERROR: AddressSanitizer:`
+line — without an explicit check, the most dangerous outcome would have been
+the quietest. The fourth matters because UBSan does not halt by default, so a
+UB-only finding would otherwise read as a clean exit.
+
+The `MAXLEN` count guard pins an assumption ESBMC does not guarantee:
+`ctest.cpp:370-380` emits one array per C type, filled in trace order from
+*every* nondet in the counterexample, not only the harness's — the generated
+`int` and pointer arrays are proof, since the harness makes no such calls. One
+stray `char`-typed nondet ahead of the loop would shift every replayed byte by
+one and still produce a crash: a false confirmation.
+
+### Two defects in ESBMC's test-case generator
+
+Both are worked around in the Makefile; neither blocks the result. Filed as
+[#6207](https://github.com/esbmc/esbmc/issues/6207) and
+[#6208](https://github.com/esbmc/esbmc/issues/6208).
+
+1. **The generated C++ test case does not compile**
+   ([#6207](https://github.com/esbmc/esbmc/issues/6207)). The nondet-pointer stub is
+   emitted as `static const void* v[] = { 0 }; return v[i++];` from a function
+   returning `void*` (`src/goto-symex/ctest.cpp:378`, with `c_type` `"void*"`
+   from line 167). `const` + `void*` composes to *array of pointer to const
+   void*, so the `return` drops a qualifier: a hard error in C++, and in C a
+   constraint violation that GCC diagnoses as a warning by default and an
+   error under `-pedantic-errors`. Any counterexample containing a nondet
+   pointer is affected — both of ours are. Fix is to move the `const`:
+   `static void *const v[]`.
+2. **The generated `CMakeLists.txt` omits the file defining `main`**
+   ([#6208](https://github.com/esbmc/esbmc/issues/6208)). It emits
+   `add_executable(test_case <src> test_case.c)` where `<src>` comes from
+   `ctest.cpp:342` reading the `input-file` option — which holds the *last*
+   input file, not the entry-point TU. Given `esbmc main.c helper.c`, the
+   generated target lists `helper.c` and the documented `cmake … && ctest`
+   flow dies at link with `undefined reference to 'main'`. Here it fails even
+   earlier: the name is written bare while the `CMakeLists.txt` lands in the
+   output directory, so CMake reports "Cannot find source file" at generate
+   time. We compile directly instead.
 
 ---
 
@@ -574,6 +698,14 @@ verifier for the first time.
   loop also truncates at embedded nulls, and `strlen` is evaluated before the
   null check. Reproducer: `esbmc_bug_repros/om_string_ptr_len_ctor.cpp`.
   Worked around in the harnesses, so it no longer blocks the proof.
+* **[esbmc/esbmc#6207](https://github.com/esbmc/esbmc/issues/6207)** — **OPEN.**
+  `--generate-ctest-testcase` emits `static const void* v[]` returned from a
+  `void*` function, so any counterexample with a nondet pointer produces a test
+  case that does not compile. Worked around in the `testgen` target.
+* **[esbmc/esbmc#6208](https://github.com/esbmc/esbmc/issues/6208)** — **OPEN.**
+  The generated `CMakeLists.txt` names only the last input file, omitting the
+  TU that defines `main`, so the documented `cmake && ctest` flow fails. We
+  compile the replay directly instead.
 
 ---
 
@@ -582,6 +714,7 @@ verifier for the first time.
 ```bash
 make confirm  # ESBMC on the two named defect inputs   -> both VERIFICATION FAILED
 make esbmc    # ESBMC over the symbolic harnesses      -> VERIFICATION FAILED
+make testgen  # counterexamples -> executable tests    -> both crash under ASan
 make smoke    # ESBMC frontend/OM smoke test           -> VERIFICATION SUCCESSFUL
 make repros   # the filed ESBMC reproducers            -> see below
 make asan     # independent ASan cross-check
