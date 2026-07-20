@@ -45,6 +45,45 @@
 #define MAXLEN 6
 #endif
 
+/* Test-case generation and replay (see the `testgen` target in the Makefile).
+ *
+ * ESBMC's --generate-ctest-testcase emits concrete implementations named
+ * __VERIFIER_nondet_<type> (src/goto-symex/ctest.cpp:376), so the harness must
+ * call *those* names for the generated file to link against it. The collector
+ * itself keys on the `nondet$` SSA symbol, not the callee name, so this rename
+ * changes nothing about what ESBMC explores.
+ *
+ *   ESBMC_TESTGEN - compiled by ESBMC to produce test_case.cpp.
+ *   ESBMC_REPLAY  - compiled by g++/ASan against that file. __ESBMC_assume
+ *                   becomes a runtime assert, so replaying values that violate
+ *                   the harness preconditions (the RFC 4648 alphabet, len
+ *                   bound) aborts rather than silently testing something else.
+ */
+#if defined(ESBMC_TESTGEN) || defined(ESBMC_REPLAY)
+#define nondet_size_t __VERIFIER_nondet_ulong
+#define nondet_char __VERIFIER_nondet_char
+#endif
+
+#ifdef ESBMC_REPLAY
+#include <cstdio>
+#include <cstdlib>
+/* Deliberately not assert(): the replay is built -DNDEBUG, to get the release
+ * semantics under which the B-1 overflow is silent heap corruption rather than
+ * a caught Array::GetItem assert. assert() would compile out with it, and the
+ * check below is the one thing that distinguishes "the counterexample is a
+ * real input" from "the counterexample violates the harness's own
+ * preconditions and the crash proves nothing". */
+#define __ESBMC_assume(cond)                                                   \
+  do                                                                           \
+  {                                                                            \
+    if (!(cond))                                                               \
+    {                                                                          \
+      std::fprintf(stderr, "replay: assumption violated: %s\n", #cond);        \
+      std::abort();                                                            \
+    }                                                                          \
+  } while (0)
+#endif
+
 extern "C" {
 size_t nondet_size_t();
 char nondet_char();
@@ -92,6 +131,17 @@ int main()
 
   const Aws::String input(raw, len);
   const Aws::Utils::Base64::Base64 codec;
+
+#ifdef ESBMC_REPLAY
+  /* Report the input actually reconstructed from the generated test case, so a
+   * replay cannot silently confirm a different input than the one the report
+   * names. Hex because a counterexample may contain non-printable bytes -- B-2's
+   * begins with 0x80. */
+  std::fprintf(stderr, "replay: input=");
+  for (size_t i = 0; i < len; ++i)
+    std::fprintf(stderr, "%02x", (unsigned)(unsigned char)raw[i]);
+  std::fprintf(stderr, " len=%zu\n", len);
+#endif
 
   /* The property is memory safety of the call itself: ESBMC's array-bounds and
    * pointer checks (on by default; only --no-bounds-check / --no-pointer-check
