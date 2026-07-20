@@ -41,23 +41,31 @@ scripted transformation you can diff rather than a hand-maintained fork.
 ## Running
 
 ```bash
-make asan     # confirmed findings; needs only GCC
-make smoke    # ESBMC frontend smoke test
+make confirm  # ESBMC on the two named defect inputs (B-1, B-2)
 make esbmc    # symbolic memory-safety harnesses
+make smoke    # ESBMC frontend smoke test
 make repros   # the ESBMC bug reproducers
+make asan     # independent ASan cross-check; needs only GCC
 make model    # regenerate model/ from vendor/
 ```
 
-`make asan` is the one that produces the findings. `make smoke` is **green**
-against a build carrying esbmc/esbmc#6190 and #6195 — ESBMC converts and
-symexes `Aws::Utils::ByteBuffer`.
+Against a build carrying esbmc/esbmc#6190 and #6195, **ESBMC confirms both
+findings**: `make confirm` reports `VERIFICATION FAILED` on `"AAAA="` (B-1,
+`assertion GetItem`) and on `\xFF\xFF\xFF\xFF` (B-2, out-of-bounds read), and
+`make esbmc` fails the same way symbolically with input bytes constrained to the
+RFC 4648 alphabet. `FAILED` is the desired result — it is the confirmation.
+`make asan` is the independent cross-check.
 
-`make esbmc` now runs the symbolic harnesses end-to-end but does not yet yield
-a verdict on `Decode`: it fails on a spurious `basic_string overflow` inside
-ESBMC's own string model, which asserts `n < strlen(s)` and so rejects the
-valid `std::string("abc", 3)`. Reproducer:
-`esbmc_bug_repros/om_string_ptr_len_ctor.cpp`. See REPORT.md, "Blocked again,
-one layer up", and ESBMC_FIX_PLAN.md.
+Two things to know before changing anything:
+
+* **Do not lower `UNWIND`.** The Base64 constructor fills a 256-entry decoding
+  table in a loop; truncating it makes every byte decode to the sentinel, skips
+  the overflowing writes, and yields `VERIFICATION SUCCESSFUL` on a program that
+  overflows. The old value of 8 did exactly that.
+* The harnesses work around esbmc/esbmc#6199 (the OM's `basic_string(const
+  char*, n)` asserts `n < strlen(s)`) by keeping a spare byte in the backing
+  array. Reproducer: `esbmc_bug_repros/om_string_ptr_len_ctor.cpp`. See
+  REPORT.md and ESBMC_FIX_PLAN.md.
 
 ## Toolchain notes
 

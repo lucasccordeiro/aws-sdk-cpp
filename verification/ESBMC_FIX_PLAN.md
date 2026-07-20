@@ -8,8 +8,8 @@ Two issues were filed against ESBMC while trying to verify `Base64::Decode`
 | Issue | State | What is left |
 |---|---|---|
 | [#6183](https://github.com/esbmc/esbmc/issues/6183) | **CLOSED** by [PR #6190](https://github.com/esbmc/esbmc/pull/6190), merged | `shared_ptr` only, deliberately deferred — needs its own issue |
-| [#6184](https://github.com/esbmc/esbmc/issues/6184) | **fix in review** — [PR #6195](https://github.com/esbmc/esbmc/pull/6195), open | Merge it |
-| `basic_string(const char*, size_t)` | **new, not yet filed** | File it; it is what blocks the proof now |
+| [#6184](https://github.com/esbmc/esbmc/issues/6184) | **CLOSED** by [PR #6195](https://github.com/esbmc/esbmc/pull/6195), merged | — |
+| [#6199](https://github.com/esbmc/esbmc/issues/6199) | **OPEN** — filed 2026-07-19 | Land it, then revert the harness workarounds |
 
 Two framings in earlier revisions of this document are **superseded**:
 
@@ -265,7 +265,12 @@ errors. `--memory-leak-check` was dropped too, since the OM's `#if 0`-ed
 
 ## New: `basic_string(const char*, size_t)` rejects valid input
 
-**Status:** found by running the harnesses post-#6195; not yet filed upstream.
+**Status:** found by running the harnesses post-#6195; filed as
+[esbmc/esbmc#6199](https://github.com/esbmc/esbmc/issues/6199), still open.
+Worked around in the harnesses (see REPORT.md), so it no longer blocks the
+proof. The filed issue adds two defects beyond the wrong comparison: the copy
+loop truncates at embedded nulls while `_size` is already `n`, and `strlen` is
+evaluated before the `s != NULL` check.
 
 `src/cpp/library/string:1132` asserts:
 

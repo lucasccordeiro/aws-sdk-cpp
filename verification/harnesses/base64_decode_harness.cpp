@@ -53,14 +53,30 @@ char nondet_char();
 int main()
 {
   /* Unconstrained length -- ESBMC explores every length in range, including
-   * the non-multiples of 4 that the block loop truncates. */
+   * the non-multiples of 4 that the block loop truncates.
+   *
+   * Strictly less than MAXLEN, not <=, to dodge esbmc/esbmc#6199: the OM's
+   * basic_string(const char*, size_t n) asserts n < strlen(s), so the
+   * exact-length construction Aws::String(raw, MAXLEN) fails inside the ctor
+   * before Decode is ever called. Keeping one spare byte in raw[] leaves
+   * strlen(raw) > len for every len explored. Revert to <= once that is fixed. */
   const size_t len = nondet_size_t();
-  __ESBMC_assume(len <= (size_t)MAXLEN);
+  __ESBMC_assume(len < (size_t)MAXLEN);
 
   char raw[MAXLEN + 1];
   for (size_t i = 0; i < (size_t)MAXLEN; ++i)
   {
     const char c = nondet_char();
+
+    /* Second half of the esbmc/esbmc#6199 workaround. Keeping one spare byte in
+     * raw[] only guarantees strlen(raw) > len while no interior byte is NUL; an
+     * unconstrained NUL shortens strlen and trips the OM's bogus
+     * n < strlen(s) precondition before Decode is reached. Excluding '\0' is
+     * the narrowest constraint that keeps ANY_BYTE meaningful -- every other
+     * byte value, high-bit ones included, is still explored, so this does not
+     * weaken the B-2 result. Remove once #6199 lands. */
+    __ESBMC_assume(c != '\0');
+
 #ifdef HARNESS_MODE_ALPHABET
     /* RFC 4648 base64 alphabet plus the pad character. Note this deliberately
      * still permits '=' at *any* position -- a caller cannot police interior
