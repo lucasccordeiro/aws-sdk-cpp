@@ -3,7 +3,8 @@
 **Target:** `aws/aws-sdk-cpp` @ `95988ca5527201b4ed8804a942d8d0788ad1755c` (v1.11.850)
 **Function under analysis:** `Aws::Utils::Base64::Base64::Decode`
 (`src/aws-cpp-sdk-core/source/utils/base64/Base64.cpp:91-121`)
-**Tool:** ESBMC master `d0bb9881f2` (originally reported against 8.4.0)
+**Tool:** ESBMC master `cf6a8d56f9` (8.4.0, carrying #6190/#6195/#6209;
+originally reported against `d0bb9881f2`)
 **Cross-check:** GCC + AddressSanitizer/UBSan
 
 ---
@@ -299,7 +300,11 @@ to be mapped there, so nothing faults and the sanitizer sees nothing. ESBMC
 flags the same inputs on the same machine, because it reasons about the declared
 bound of a 256-entry array rather than waiting for an unmapped page. A sanitizer
 finds a defect only where the platform happens to punish it; the bounds argument
-holds regardless.
+holds regardless. On x86_64 Linux the platform *does* punish it: the 2026-07-20
+re-run of `make asan` reports `ERROR: AddressSanitizer: SEGV` for all four
+high-bit inputs (`0xffffffff`, `0x80414141`, `0xe9e9e9e9`, `0x41414180`), so on
+the SDK's most common server platform the defect faults concretely as well as
+symbolically.
 
 It is a read, not a write, so the impact is a crash (DoS) or, if the wild
 address happens to be mapped, decoding against attacker-influenced table data —
@@ -400,10 +405,11 @@ one and still produce a crash: a false confirmation.
 
 ### Two defects in ESBMC's test-case generator
 
-Both were worked around in the Makefile; neither blocked the result. Filed as
-[#6207](https://github.com/esbmc/esbmc/issues/6207) (now **fixed** by
-[PR #6209](https://github.com/esbmc/esbmc/pull/6209)) and
-[#6208](https://github.com/esbmc/esbmc/issues/6208) (still open).
+Both were worked around in the Makefile; neither blocked the result. Both are
+now **fixed upstream**: [#6207](https://github.com/esbmc/esbmc/issues/6207) by
+[PR #6209](https://github.com/esbmc/esbmc/pull/6209) and
+[#6208](https://github.com/esbmc/esbmc/issues/6208) by
+[PR #6210](https://github.com/esbmc/esbmc/pull/6210).
 
 1. **The generated C++ test case does not compile**
    ([#6207](https://github.com/esbmc/esbmc/issues/6207), **fixed** by
@@ -423,15 +429,21 @@ Both were worked around in the Makefile; neither blocked the result. Filed as
    widened to accept both spellings and its `void*` `sed` rewrite is now a
    no-op against a post-#6209 build.
 2. **The generated `CMakeLists.txt` omits the file defining `main`**
-   ([#6208](https://github.com/esbmc/esbmc/issues/6208)). It emits
-   `add_executable(test_case <src> test_case.c)` where `<src>` comes from
-   `ctest.cpp:342` reading the `input-file` option — which holds the *last*
-   input file, not the entry-point TU. Given `esbmc main.c helper.c`, the
-   generated target lists `helper.c` and the documented `cmake … && ctest`
-   flow dies at link with `undefined reference to 'main'`. Here it fails even
-   earlier: the name is written bare while the `CMakeLists.txt` lands in the
-   output directory, so CMake reports "Cannot find source file" at generate
-   time. We compile directly instead.
+   ([#6208](https://github.com/esbmc/esbmc/issues/6208), **fixed** by
+   [PR #6210](https://github.com/esbmc/esbmc/pull/6210)). It emitted
+   `add_executable(test_case <src> test_case.c)` where `<src>` came from
+   `ctest.cpp:342` reading the `input-file` option — which, since `optionst`
+   stores options in a `map<string,string>`, only ever held the *last*
+   positional argument, not the entry-point TU. Given `esbmc main.c helper.c`,
+   the generated target listed `helper.c` and the documented `cmake … && ctest`
+   flow died at link with `undefined reference to 'main'`. Here it failed even
+   earlier: the name was written bare while the `CMakeLists.txt` lands in the
+   output directory, so CMake reported "Cannot find source file" at generate
+   time. #6210 reads the full input list from `configt::args` and emits
+   absolute paths, so the generated project now names every TU and configures
+   even when ESBMC did not run in the sources' own directory. We compile the
+   replay directly regardless, so the `testgen` target is unaffected — the fix
+   makes the documented `cmake … && ctest` flow usable, which our flow bypasses.
 
 ---
 
@@ -715,10 +727,15 @@ verifier for the first time.
   `CHECK_FILE` regression tests under
   `regression/witnesses/test_case_generation/ctest_gen_pointer{,_cpp}`. Was
   worked around in the `testgen` target; that workaround is now redundant.
-* **[esbmc/esbmc#6208](https://github.com/esbmc/esbmc/issues/6208)** — **OPEN.**
-  The generated `CMakeLists.txt` names only the last input file, omitting the
-  TU that defines `main`, so the documented `cmake && ctest` flow fails. We
-  compile the replay directly instead.
+* **[esbmc/esbmc#6208](https://github.com/esbmc/esbmc/issues/6208)** —
+  **CLOSED** by [PR #6210](https://github.com/esbmc/esbmc/pull/6210).
+  The generated `CMakeLists.txt` named only the last input file (the
+  `map<string,string>`-backed `input-file` option retained only the last
+  positional argument), omitting the TU that defines `main`, so the documented
+  `cmake && ctest` flow failed. #6210 reads the full list from `configt::args`
+  and emits absolute paths, with C and C++ two-TU regression tests under
+  `regression/witnesses/test_case_generation/ctest_gen_multifile{,_cpp}`. We
+  compile the replay directly, so the `testgen` target never depended on it.
 
 ---
 
@@ -743,5 +760,10 @@ expected to report `FAILED` because #6199 is still open — when it starts passi
 the harness workarounds described above can be reverted.
 
 The ESBMC targets need a build at or after those two fixes; `make asan` requires
-only a C++ compiler. Both were last run against ESBMC master `d0bb9881f2` on
-arm64 macOS.
+only a C++ compiler. Last re-run on 2026-07-20 against ESBMC `cf6a8d56f9`
+(carrying #6209) on x86_64 Linux: `confirm` FAILED on both inputs (18164 /
+18152 VCCs), `esbmc` FAILED on both symbolic modes (18186 VCCs each), `testgen`
+reproduced B-1 at `Base64.cpp:115` and B-2 at `Base64.cpp:103` under ASan,
+`smoke` SUCCESSFUL, and `repros` gave SUCCESSFUL for the four #6183/#6184 cases
+and the expected FAILED for the still-open #6199. The earlier arm64 macOS run
+against `d0bb9881f2` agreed on every verdict.
