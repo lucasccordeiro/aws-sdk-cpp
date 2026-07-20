@@ -400,20 +400,28 @@ one and still produce a crash: a false confirmation.
 
 ### Two defects in ESBMC's test-case generator
 
-Both are worked around in the Makefile; neither blocks the result. Filed as
-[#6207](https://github.com/esbmc/esbmc/issues/6207) and
-[#6208](https://github.com/esbmc/esbmc/issues/6208).
+Both were worked around in the Makefile; neither blocked the result. Filed as
+[#6207](https://github.com/esbmc/esbmc/issues/6207) (now **fixed** by
+[PR #6209](https://github.com/esbmc/esbmc/pull/6209)) and
+[#6208](https://github.com/esbmc/esbmc/issues/6208) (still open).
 
 1. **The generated C++ test case does not compile**
-   ([#6207](https://github.com/esbmc/esbmc/issues/6207)). The nondet-pointer stub is
+   ([#6207](https://github.com/esbmc/esbmc/issues/6207), **fixed** by
+   [PR #6209](https://github.com/esbmc/esbmc/pull/6209)). The nondet-pointer stub was
    emitted as `static const void* v[] = { 0 }; return v[i++];` from a function
    returning `void*` (`src/goto-symex/ctest.cpp:378`, with `c_type` `"void*"`
    from line 167). `const` + `void*` composes to *array of pointer to const
    void*, so the `return` drops a qualifier: a hard error in C++, and in C a
    constraint violation that GCC diagnoses as a warning by default and an
    error under `-pedantic-errors`. Any counterexample containing a nondet
-   pointer is affected — both of ours are. Fix is to move the `const`:
-   `static void *const v[]`.
+   pointer is affected — both of ours are. #6209 emits the declaration in
+   **east-const** form — `static void* const v[]`, binding `const` to the
+   array element rather than the pointee — which is identical for every scalar
+   spelling, so the generated case now compiles unmodified. The change applies
+   to *every* nondet table, not just pointers: the `char` array is now
+   `static char const v[]` too, so the `testgen` target's count-check regex was
+   widened to accept both spellings and its `void*` `sed` rewrite is now a
+   no-op against a post-#6209 build.
 2. **The generated `CMakeLists.txt` omits the file defining `main`**
    ([#6208](https://github.com/esbmc/esbmc/issues/6208)). It emits
    `add_executable(test_case <src> test_case.c)` where `<src>` comes from
@@ -698,10 +706,15 @@ verifier for the first time.
   loop also truncates at embedded nulls, and `strlen` is evaluated before the
   null check. Reproducer: `esbmc_bug_repros/om_string_ptr_len_ctor.cpp`.
   Worked around in the harnesses, so it no longer blocks the proof.
-* **[esbmc/esbmc#6207](https://github.com/esbmc/esbmc/issues/6207)** — **OPEN.**
-  `--generate-ctest-testcase` emits `static const void* v[]` returned from a
-  `void*` function, so any counterexample with a nondet pointer produces a test
-  case that does not compile. Worked around in the `testgen` target.
+* **[esbmc/esbmc#6207](https://github.com/esbmc/esbmc/issues/6207)** —
+  **CLOSED** by [PR #6209](https://github.com/esbmc/esbmc/pull/6209).
+  `--generate-ctest-testcase` emitted `static const void* v[]` returned from a
+  `void*` function, so any counterexample with a nondet pointer produced a test
+  case that did not compile. #6209 switches the emitted declaration to
+  east-const (`static void* const v[]`) for every scalar type, with two
+  `CHECK_FILE` regression tests under
+  `regression/witnesses/test_case_generation/ctest_gen_pointer{,_cpp}`. Was
+  worked around in the `testgen` target; that workaround is now redundant.
 * **[esbmc/esbmc#6208](https://github.com/esbmc/esbmc/issues/6208)** — **OPEN.**
   The generated `CMakeLists.txt` names only the last input file, omitting the
   TU that defines `main`, so the documented `cmake && ctest` flow fails. We

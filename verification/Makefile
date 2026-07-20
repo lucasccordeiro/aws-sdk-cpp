@@ -133,13 +133,17 @@ ASAN_FLAGS := -std=c++11 -g -O1 -fsanitize=address,undefined \
 #
 # Two defects in the generator are worked around here rather than blocking:
 #
-#  (a) The nondet-pointer stub is emitted as
+#  (a) The nondet-pointer stub was emitted as
 #          static const void* v[] = { 0 };  return v[i++];
 #      from a function returning void* (src/goto-symex/ctest.cpp:378, with
 #      c_type "void*" from line 167). const void* -> void* is ill-formed in C++
 #      and a constraint violation in C, so ANY counterexample containing a
 #      nondet pointer yields a test case that does not compile. Both of ours
 #      do. Rewritten below to `void *const v[]`.
+#      FIXED upstream by esbmc/esbmc#6209, which emits east-const for every
+#      scalar type: `static void* const v[]` (and `static char const v[]`,
+#      etc.). Against a post-#6209 build the `sed` rewrite below is a no-op, but
+#      the count-check regex had to accept both const spellings -- see step (1).
 #
 #  (b) The generated CMakeLists.txt lists only $(MEMSTUB) as "the original
 #      source" -- ctest.cpp:342 takes config.options "input-file", which holds
@@ -187,7 +191,7 @@ define testgen_case
 	    || { echo "  FAIL: no test case generated (see testgen.log)"; exit 1; }
 	@grep -E "^(char|unsigned long) __VERIFIER_nondet" -A3 \
 	    $(RESULTS)/testgen_$(1)/test_case.cpp
-	@n=`sed -n 's/.*static const char v\[\] = { \(.*\) };.*/\1/p' \
+	@n=`sed -n 's/.*static [a-z ]*char[a-z ]* v\[\] = { \(.*\) };.*/\1/p' \
 	      $(RESULTS)/testgen_$(1)/test_case.cpp | tr ',' '\n' | wc -l`; \
 	 test "$$n" -eq $(MAXLEN) \
 	    || { echo "  FAIL: char array has $$n entries, expected $(MAXLEN)"; \
