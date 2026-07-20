@@ -145,13 +145,17 @@ ASAN_FLAGS := -std=c++11 -g -O1 -fsanitize=address,undefined \
 #      etc.). Against a post-#6209 build the `sed` rewrite below is a no-op, but
 #      the count-check regex had to accept both const spellings -- see step (1).
 #
-#  (b) The generated CMakeLists.txt lists only $(MEMSTUB) as "the original
-#      source" -- ctest.cpp:342 takes config.options "input-file", which holds
+#  (b) The generated CMakeLists.txt listed only $(MEMSTUB) as "the original
+#      source" -- ctest.cpp:342 took config.options "input-file", which holds
 #      the LAST input file, not the entry-point TU. The harness that defines
-#      main is therefore missing: in general the documented cmake+ctest flow
+#      main was therefore missing: in general the documented cmake+ctest flow
 #      dies at link with "undefined reference to main", and here even earlier,
 #      since the bare filename does not exist beside the generated
 #      CMakeLists.txt. We compile directly instead.
+#      FIXED upstream by esbmc/esbmc#6210, which reads the full input list from
+#      configt::args and emits absolute paths, so the generated project now
+#      names every TU. We still compile directly (simpler, solver-agnostic),
+#      so this target neither needed the fix nor is affected by it.
 #
 # A replay is a CONFIRMATION only if all four hold; any other outcome fails the
 # target, because a green testgen that means "the process died somehow" is
