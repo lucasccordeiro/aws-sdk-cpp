@@ -286,13 +286,17 @@ asan: | $(RESULTS)
 	@rm -f $(RESULTS)/.err
 
 # ---------------------------------------------------------------------------
-# Reproducers filed against esbmc/esbmc. All five are now fixed, so every one of
-# these is expected to report SUCCESSFUL:
-#   #6183 (OM gaps)              -> FIXED by #6190
-#   #6184 (GOTO-convert SIGABRT) -> FIXED by #6195
-#   #6199 (basic_string ptr+len) -> FIXED by #6225
-# A FAILED verdict on any of them now means an ESBMC regression or a build
-# predating the fixes -- there is no longer an expected-failing case here.
+# Reproducers filed against esbmc/esbmc.
+#   #6183 (OM gaps)              -> FIXED by #6190, expect SUCCESSFUL
+#   #6184 (GOTO-convert SIGABRT) -> FIXED by #6195, expect SUCCESSFUL
+#   #6199 (basic_string ptr+len) -> FIXED by #6225, expect SUCCESSFUL
+#   allocate_shared              -> STILL MISSING, expect PARSING ERROR
+# A verdict flip on the first three means an ESBMC regression or a build
+# predating the fixes. The last one is the open gap: when it starts parsing,
+# the shim in stubs/esbmc_compat.h and the -D that gates it can both go, and
+# this repo needs no compatibility layer at all. Note it fails at PARSING, not
+# with a FAILED verdict -- see the reproducer for why that distinction is the
+# whole point.
 # ---------------------------------------------------------------------------
 repros: | $(RESULTS)
 	@echo "== OM: missing <type_traits> members (#6183, fixed) =="
@@ -311,6 +315,9 @@ repros: | $(RESULTS)
 	-$(ESBMC) $(ESBMC_STD) $(ESBMC_DEFS) $(INCLUDES) \
 	    esbmc_bug_repros/crash_goto_convert_array.cpp \
 	    $(ESBMC_PROPS) $(ESBMC_BOUND) 2>&1 | tail -4 | tee $(RESULTS)/repro_crash.log
+	@echo "== OM: allocate_shared absent (OPEN -> expect PARSING ERROR) =="
+	-$(ESBMC) $(ESBMC_STD) esbmc_bug_repros/om_allocate_shared.cpp 2>&1 \
+	    | tail -4 | tee $(RESULTS)/repro_allocate_shared.log
 
 clean:
 	rm -rf $(RESULTS)

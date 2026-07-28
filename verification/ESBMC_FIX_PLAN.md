@@ -114,6 +114,9 @@ declaration, and the Makefile gate was renamed `ESBMC_OM_MISSING_SHARED_PTR` →
 has a real `shared_ptr` and a `make_shared` to build on, so adding
 `allocate_shared` is a much smaller job than it was when #6190 deferred it.
 
+Reproducer: `esbmc_bug_repros/om_allocate_shared.cpp`, pinned by `make repros`
+as the one expected-failing case. Not yet filed upstream.
+
 ### Known OM defects still unfixed
 
 Re-verified on 2026-07-28 against `8d3cee251a`:

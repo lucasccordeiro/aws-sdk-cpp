@@ -566,6 +566,9 @@ with no definition, so a harness that ever genuinely reaches `allocate_shared`
 fails at link time rather than verifying against an allocator-blind
 substitute.
 
+Reproducer: `esbmc_bug_repros/om_allocate_shared.cpp` — no AWS headers, accepted
+by `g++ -fsyntax-only`, and pinned by `make repros`. Not yet filed upstream.
+
 A ninth gap surfaced only once the crash was fixed and the harnesses could
 actually run — `basic_string(const char*, size_t)` asserting `n < strlen(s)`,
 described under "Blocked again, one layer up" below. It is a false positive
@@ -853,10 +856,13 @@ make asan     # independent ASan cross-check
 `VERIFICATION FAILED` from `confirm` and `esbmc` is the expected, desired result
 — it is the confirmation.
 
-Under `repros`, **all five** reproducers are now expected to report
-`SUCCESSFUL`, since every issue they pin is fixed. A `FAILED` there means an
-ESBMC regression or a build predating the fixes; there is no longer an
-expected-failing case.
+Under `repros`, the five reproducers for **filed** issues are now expected to
+report `SUCCESSFUL`, since every issue they pin is fixed; a `FAILED` there means
+an ESBMC regression or a build predating the fixes. The sixth,
+`om_allocate_shared.cpp`, is expected to stop at `ERROR: PARSING ERROR` — it
+pins the one gap that remains, and when it starts parsing, the shim and the
+`-D` that gates it can both be deleted and this repo needs no compatibility
+layer at all.
 
 The ESBMC targets need a build carrying #6190, #6195, #6209, #6210 and #6225;
 `make asan` requires only a C++ compiler.
@@ -871,7 +877,7 @@ no harness workarounds:
 | `confirm` | FAILED on both inputs — B-1 `index < m_length` at `Array.h:208` (18252 VCCs); B-2 out-of-bounds read at `Base64.cpp:103` (18247 VCCs) |
 | `esbmc` | FAILED on both modes (19737 VCCs each) — ALPHABET on B-1 at `Array.h:208`, ANY_BYTE on B-2 at `Base64.cpp:104` |
 | `testgen` | B-1 `"zzY/="` → `heap-buffer-overflow` at `Base64.cpp:115`; B-2 `3cbd3d3d` → `SEGV` at `Base64.cpp:104` |
-| `repros` | `SUCCESSFUL` on all five |
+| `repros` | `SUCCESSFUL` on all five filed issues; `om_allocate_shared.cpp` stops at `PARSING ERROR`, as expected |
 | `asan` | 3 of 8 overflow under `-DNDEBUG`, same 3 assert in debug, all 4 high-bit inputs SEGV |
 
 The VCC counts are up from the 2026-07-20 run (18164/18152 for `confirm`, 18186
