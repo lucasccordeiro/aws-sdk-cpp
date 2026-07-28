@@ -12,11 +12,12 @@
  *                                            Expect: dereference failure,
  *                                            access to object out of bounds.
  *
- * The trailing filler byte in each literal is NOT part of the input: the string
- * is built with an explicit length that excludes it. It only pads the backing
- * array so the OM's basic_string(const char*, n) precondition n < strlen(s)
- * holds -- see esbmc/esbmc#6199. Without it the constructor fails before Decode
- * is reached, which is an artefact of the model, not a finding.
+ * Each literal used to carry a trailing filler byte, excluded from the string by
+ * the explicit length, purely to pad the backing array so the OM's
+ * basic_string(const char*, n) precondition n < strlen(s) held -- see
+ * esbmc/esbmc#6199. #6225 fixed that constructor to copy exactly n characters
+ * without consulting strlen, so the fillers are gone and each literal is now
+ * exactly the input under test.
  */
 
 #include "esbmc_compat.h"
@@ -26,10 +27,10 @@
 int main()
 {
 #ifdef CASE_B2
-  const Aws::String input("\xff\xff\xff\xff" "A", 4);
+  const Aws::String input("\xff\xff\xff\xff", 4);
   __ESBMC_assert(input.length() == 4, "input is the four 0xFF bytes");
 #else
-  const Aws::String input("AAAA=" "X", 5);
+  const Aws::String input("AAAA=", 5);
   __ESBMC_assert(input.length() == 5, "input is \"AAAA=\"");
 #endif
 
