@@ -6,18 +6,21 @@
 #   make asan       - concrete ASan reproducers (independent cross-check)
 #   make testgen    - executable test cases generated from the counterexamples
 #   make repros     - status of the reproducers filed against esbmc/esbmc
-#   make model      - regenerate model/ from pristine vendor/
 #   make clean
 #
-# STATUS: the `esbmc` targets now run and confirm both defects. esbmc/esbmc#6184
-# (placement new with no initializer -> one-operand "comma" -> adjust_comma reads
-# op1() out of bounds; reproducer esbmc_bug_repros/placement_new_no_init.cpp) is
-# fixed by #6195, and #6183 by #6190. Requires a build carrying both; against an
-# older one these targets stop at a parse error or abort instead.
+# STATUS: the `esbmc` targets run and confirm both defects, with no workarounds
+# left in the harnesses. Every ESBMC issue this exercise filed is now closed:
+# #6183 by #6190 (OM members), #6184 by #6195 (placement new with no initializer
+# -> one-operand "comma" -> adjust_comma reads op1() out of bounds), #6199 by
+# #6225 (basic_string(const char*, n) asserting n < strlen(s)), and #6207/#6208
+# by #6209/#6210 (test-case generation). Requires a build carrying all of them;
+# against an older one these targets stop at a parse error, abort, or report a
+# spurious basic_string overflow instead.
 #
-# The remaining OM defect, esbmc/esbmc#6199 (basic_string(const char*, n) asserts
-# n < strlen(s); reproducer esbmc_bug_repros/om_string_ptr_len_ctor.cpp), is
-# worked around in the harnesses rather than blocking them -- see REPORT.md.
+# The one OM gap left is std::allocate_shared, still shimmed in
+# stubs/esbmc_compat.h behind -D ESBMC_OM_MISSING_ALLOCATE_SHARED. #6403 modelled
+# shared_ptr/weak_ptr/make_shared but not allocate_shared, which is the name
+# AWSAllocator.h:117 actually calls.
 #
 # UNWIND is load-bearing -- do not lower it. Base64::Base64() populates a
 # 256-entry decoding table via memset(256) plus a 64-iteration fill loop. Under
@@ -33,13 +36,17 @@ UNWIND      ?= 300
 MAXLEN      ?= 7
 
 VERIF_DIR   := $(CURDIR)
-INCLUDES    := -Istubs -Ivendor -Imodel/include
-# ASan builds use pristine vendor headers: no CryptoBuffer surgery is needed
-# there, so the compiled artefact is as close to upstream as possible.
-ASAN_INC    := -Istubs -Ivendor -Ivendor/include
+# ESBMC and ASan now share one include set, both pointing at pristine vendor/.
+# There used to be a second, generated tree (model/, built by
+# scripts/make_model_headers.sh) with CryptoBuffer cut out of Array.h, because
+# merely including its definition aborted GOTO conversion. #6195 fixed that, so
+# the surgery, the generated tree and the script are all gone: everything ESBMC
+# analyses is now byte-for-byte upstream.
+INCLUDES    := -Istubs -Ivendor -Ivendor/include
+ASAN_INC    := $(INCLUDES)
 
 ESBMC_STD   := --std c++11
-ESBMC_DEFS  := -D ESBMC_OM_MISSING_SHARED_PTR
+ESBMC_DEFS  := -D ESBMC_OM_MISSING_ALLOCATE_SHARED
 # Array-bounds and pointer checks are ON BY DEFAULT in current ESBMC -- only
 # --no-bounds-check / --no-pointer-check exist. The old affirmative spellings
 # were removed and are now hard errors, so do not re-add them.
@@ -58,12 +65,9 @@ ESBMC_COMMON := $(ESBMC_STD) $(ESBMC_DEFS) $(ESBMC_PROPS) $(ESBMC_BOUND)
 MEMSTUB     := stubs/aws_memory_stub.cpp
 RESULTS     := results
 
-.PHONY: all smoke confirm esbmc asan repros testgen model clean
+.PHONY: all smoke confirm esbmc asan repros testgen clean
 
 all: confirm asan
-
-model:
-	@./scripts/make_model_headers.sh
 
 $(RESULTS):
 	@mkdir -p $(RESULTS)
@@ -71,7 +75,7 @@ $(RESULTS):
 # ---------------------------------------------------------------------------
 # Step 1: does the frontend ingest the target at all?
 # ---------------------------------------------------------------------------
-smoke: model | $(RESULTS)
+smoke: | $(RESULTS)
 	@echo "== ESBMC smoke test (concrete input) =="
 	-$(ESBMC) $(ESBMC_STD) $(ESBMC_DEFS) $(INCLUDES) \
 	    harnesses/smoke_harness.cpp $(MEMSTUB) \
@@ -81,7 +85,7 @@ smoke: model | $(RESULTS)
 # Step 2: the two defects on their named inputs. Both are expected to report
 # VERIFICATION FAILED -- that is the confirmation, not a problem.
 # ---------------------------------------------------------------------------
-confirm: model | $(RESULTS)
+confirm: | $(RESULTS)
 	@echo "== B-1: \"AAAA=\" -- expect assertion GetItem (index < m_length) =="
 	-$(ESBMC) $(ESBMC_STD) $(ESBMC_DEFS) $(INCLUDES) \
 	    harnesses/base64_decode_concrete.cpp $(MEMSTUB) \
@@ -102,7 +106,7 @@ confirm: model | $(RESULTS)
 #             realistic caller precondition. A violation here is not an
 #             under-constrained-harness artefact.
 # ---------------------------------------------------------------------------
-esbmc: model | $(RESULTS)
+esbmc: | $(RESULTS)
 	@echo "== Base64::Decode -- unconstrained bytes =="
 	-$(ESBMC) $(ESBMC_COMMON) $(INCLUDES) -D MAXLEN=$(MAXLEN) \
 	    harnesses/base64_decode_harness.cpp $(MEMSTUB) \
@@ -131,31 +135,28 @@ ASAN_FLAGS := -std=c++11 -g -O1 -fsanitize=address,undefined \
 # actually crashes: an independent check that the counterexample is a real
 # input and not an artefact of ESBMC's own model.
 #
-# Two defects in the generator are worked around here rather than blocking:
+# Two defects in the generator used to be worked around here; both are fixed
+# upstream and the workarounds are gone:
 #
-#  (a) The nondet-pointer stub was emitted as
+#  (a) esbmc/esbmc#6207 -- the nondet-pointer stub was emitted as
 #          static const void* v[] = { 0 };  return v[i++];
-#      from a function returning void* (src/goto-symex/ctest.cpp:378, with
-#      c_type "void*" from line 167). const void* -> void* is ill-formed in C++
-#      and a constraint violation in C, so ANY counterexample containing a
-#      nondet pointer yields a test case that does not compile. Both of ours
-#      do. Rewritten below to `void *const v[]`.
-#      FIXED upstream by esbmc/esbmc#6209, which emits east-const for every
-#      scalar type: `static void* const v[]` (and `static char const v[]`,
-#      etc.). Against a post-#6209 build the `sed` rewrite below is a no-op, but
-#      the count-check regex had to accept both const spellings -- see step (1).
+#      from a function returning void*, which is ill-formed in C++, so ANY
+#      counterexample containing a nondet pointer yielded a test case that did
+#      not compile. Both of ours do contain one. Fixed by #6209, which emits
+#      east-const for every scalar type (`static void* const v[]`,
+#      `static char const v[]`); the `sed` rewrite this target used to apply is
+#      therefore deleted rather than kept as a no-op.
 #
-#  (b) The generated CMakeLists.txt listed only $(MEMSTUB) as "the original
-#      source" -- ctest.cpp:342 took config.options "input-file", which holds
-#      the LAST input file, not the entry-point TU. The harness that defines
-#      main was therefore missing: in general the documented cmake+ctest flow
-#      dies at link with "undefined reference to main", and here even earlier,
-#      since the bare filename does not exist beside the generated
-#      CMakeLists.txt. We compile directly instead.
-#      FIXED upstream by esbmc/esbmc#6210, which reads the full input list from
-#      configt::args and emits absolute paths, so the generated project now
-#      names every TU. We still compile directly (simpler, solver-agnostic),
-#      so this target neither needed the fix nor is affected by it.
+#  (b) esbmc/esbmc#6208 -- the generated CMakeLists.txt named only the last
+#      input file, omitting the TU that defines main. Fixed by #6210, which
+#      reads the full list from configt::args and emits absolute paths. We
+#      compile the replay directly anyway (simpler, solver-agnostic), so this
+#      target neither needed the fix nor is affected by it.
+#
+# --ctest-output-dir is passed explicitly: current ESBMC writes the generated
+# files into an `esbmc-ctest/` subdirectory by default, where this target
+# expects them beside testgen.log. Pinning it to `.` keeps one case per
+# results/testgen_<tag>/ directory.
 #
 # A replay is a CONFIRMATION only if all four hold; any other outcome fails the
 # target, because a green testgen that means "the process died somehow" is
@@ -177,12 +178,20 @@ ASAN_FLAGS := -std=c++11 -g -O1 -fsanitize=address,undefined \
 # one, run v[i++] off the end of a MAXLEN-element array, and still "crash" --
 # a false confirmation. The count check pins that assumption.
 TESTGEN_ESBMC := $(ESBMC_COMMON) -D ESBMC_TESTGEN -D MAXLEN=$(MAXLEN) \
-                 --generate-ctest-testcase
+                 --generate-ctest-testcase --ctest-output-dir .
 INCLUDES_ABS  := -I$(VERIF_DIR)/stubs -I$(VERIF_DIR)/vendor \
-                 -I$(VERIF_DIR)/model/include
+                 -I$(VERIF_DIR)/vendor/include
 
-# $(1) = tag, $(2) = extra -D for the harness mode, $(3) = expected Base64.cpp
-# line of frame #0 in the replay.
+# $(1) = tag, $(2) = extra -D for the harness mode, $(3) = grep -E line pattern
+# that frame #0 of the replay must match, within Base64.cpp.
+#
+# B-2 accepts any of 103-106 rather than a single line. Those four lines are the
+# four decoding-table lookups of one block -- value1..value4 -- and the defect
+# is the sign-extended index shared by all of them, so which one faults is a
+# property of the witness (which byte position the solver made high-bit), not of
+# the defect. Widening it this far and no further still rejects a crash at the
+# B-1 stores (109/112/115) or anywhere else in the file, which is the point of
+# the check.
 define testgen_case
 	@echo "== $(1): generating test case from the ESBMC counterexample =="
 	@rm -rf $(RESULTS)/testgen_$(1)
@@ -201,9 +210,6 @@ define testgen_case
 	    || { echo "  FAIL: char array has $$n entries, expected $(MAXLEN)"; \
 	         echo "        replayed bytes would not line up with the harness"; \
 	         exit 1; }
-	@sed -i.bak 's/static const void\* v\[\]/static void *const v[]/' \
-	    $(RESULTS)/testgen_$(1)/test_case.cpp
-	@rm -f $(RESULTS)/testgen_$(1)/test_case.cpp.bak
 	@echo "== $(1): replaying those values natively under ASan =="
 	@$(CXX) $(ASAN_FLAGS) -DNDEBUG -D ESBMC_REPLAY -D MAXLEN=$(MAXLEN) $(2) \
 	    $(ASAN_INC) harnesses/base64_decode_harness.cpp \
@@ -223,15 +229,17 @@ define testgen_case
 	    || { echo "  FAIL: no sanitizer diagnostic -- counterexample did not"; \
 	         echo "        survive contact with the real program"; exit 1; }; \
 	 grep -oE '#0 .*Base64\.cpp:[0-9]+' $$log | head -1; \
+	 line=`grep -oE '#0 .*Base64\.cpp:[0-9]+' $$log | head -1 | grep -oE '[0-9]+$$'`; \
 	 grep -qE '#0 .*Base64\.cpp:$(3)' $$log \
-	    || { echo "  FAIL: crashed away from Base64.cpp:$(3) -- not this defect"; \
+	    || { echo "  FAIL: crashed at Base64.cpp:$$line, expected $(3)"; \
+	         echo "        -- that is a different defect, not this one"; \
 	         exit 1; }; \
-	 echo "  OK: $(1) reproduced at Base64.cpp:$(3)"
+	 echo "  OK: $(1) reproduced at Base64.cpp:$$line"
 endef
 
-testgen: model | $(RESULTS)
+testgen: | $(RESULTS)
 	$(call testgen_case,b1,-D HARNESS_MODE_ALPHABET,115)
-	$(call testgen_case,b2,,103)
+	$(call testgen_case,b2,,10[3-6])
 
 # Inputs where the sizing pass and the fill loop disagree, plus controls.
 ASAN_CASES := AAAA AAAA= AAAA== AAAA=A QUJDRA= AAAAAAAA= AA== QUJD
@@ -278,31 +286,31 @@ asan: | $(RESULTS)
 	@rm -f $(RESULTS)/.err
 
 # ---------------------------------------------------------------------------
-# Reproducers filed against esbmc/esbmc.
-#   #6183 (OM gaps)              -> FIXED by #6190, expect SUCCESSFUL
-#   #6184 (GOTO-convert SIGABRT) -> FIXED by #6195, expect SUCCESSFUL
-#   #6199 (basic_string ptr+len) -> STILL OPEN, expect FAILED
-# A verdict flip on any of these means an ESBMC regression, an ESBMC older than
-# the fixes, or -- for #6199 -- that the fix has landed and the harness
-# workarounds described in REPORT.md can be reverted.
+# Reproducers filed against esbmc/esbmc. All five are now fixed, so every one of
+# these is expected to report SUCCESSFUL:
+#   #6183 (OM gaps)              -> FIXED by #6190
+#   #6184 (GOTO-convert SIGABRT) -> FIXED by #6195
+#   #6199 (basic_string ptr+len) -> FIXED by #6225
+# A FAILED verdict on any of them now means an ESBMC regression or a build
+# predating the fixes -- there is no longer an expected-failing case here.
 # ---------------------------------------------------------------------------
-repros: model | $(RESULTS)
+repros: | $(RESULTS)
 	@echo "== OM: missing <type_traits> members (#6183, fixed) =="
 	-$(ESBMC) $(ESBMC_STD) esbmc_bug_repros/om_missing_type_traits.cpp 2>&1 \
 	    | tail -4 | tee $(RESULTS)/repro_traits.log
 	@echo "== OM: unique_ptr operator=(nullptr_t) (#6183, fixed) =="
 	-$(ESBMC) $(ESBMC_STD) esbmc_bug_repros/om_unique_ptr_nullptr_assign.cpp 2>&1 \
 	    | tail -4 | tee $(RESULTS)/repro_uniqptr.log
-	@echo "== OM: basic_string ptr+len ctor (#6199, STILL OPEN -> expect FAILED) =="
+	@echo "== OM: basic_string ptr+len ctor (#6199, fixed by #6225) =="
 	-$(ESBMC) $(ESBMC_STD) esbmc_bug_repros/om_string_ptr_len_ctor.cpp 2>&1 \
 	    | tail -4 | tee $(RESULTS)/repro_string_ptr_len.log
 	@echo "== crash: placement new with no initializer (minimal, #6184, fixed) =="
 	-$(ESBMC) $(ESBMC_STD) esbmc_bug_repros/placement_new_no_init.cpp 2>&1 \
 	    | tail -4 | tee $(RESULTS)/repro_placement_new.log
 	@echo "== crash: GOTO conversion of Array<unsigned char> (#6184, fixed) =="
-	-$(ESBMC) $(ESBMC_STD) $(ESBMC_DEFS) -Istubs -Imodel/include \
+	-$(ESBMC) $(ESBMC_STD) $(ESBMC_DEFS) $(INCLUDES) \
 	    esbmc_bug_repros/crash_goto_convert_array.cpp \
 	    $(ESBMC_PROPS) $(ESBMC_BOUND) 2>&1 | tail -4 | tee $(RESULTS)/repro_crash.log
 
 clean:
-	rm -rf $(RESULTS) model
+	rm -rf $(RESULTS)
