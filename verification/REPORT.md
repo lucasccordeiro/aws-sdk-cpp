@@ -32,6 +32,14 @@ Both were **confirmed with a concrete reproducer under AddressSanitizer**, not
 merely predicted. Neither is an artefact of an under-constrained harness — see
 "Is it real?" below.
 
+The caller set has since been enumerated against a full checkout at the pinned
+commit: `HashingUtils::Base64Decode` has **171 call sites across 74 generated
+service clients**, and the S3 Encryption Client decodes **attacker-controlled S3
+object metadata** through this function, before any length validation, on a code
+path the *current* `S3EncryptionClientV3` inherits. See
+"[Reachability](#reachability--who-actually-calls-decode)". Earlier revisions of
+this report left that question open; it is no longer open.
+
 ESBMC's C++ frontend **did not originally ingest the target**. Eight distinct
 gaps in its C++ operational model were found and worked around, after which
 ESBMC **aborted during GOTO conversion** on `Aws::Utils::Array<unsigned char>`.
@@ -250,11 +258,13 @@ Real. Three independent reasons:
    (`Array.h:222,232`) and would not compile there.
 
    The claim survives on reasons 1, 2 and the `HashingUtils.cpp:40` half of
-   this one — but the SDK-side caller set lives in the generated service
-   clients, which are **not** in this repo's 12-file sparse `vendor/`
-   checkout and were therefore never enumerated here. Treat "reachable from
-   public API" as established and "here is who calls it in practice" as
-   unverified.
+   this one. The SDK-side caller set lives in the generated service clients,
+   which are **not** in this repo's 12-file sparse `vendor/` checkout —
+   earlier revisions therefore recorded "here is who calls it in practice" as
+   unverified. **It has since been enumerated against a full checkout at the
+   pinned commit**; see "Reachability" below. The short version is that the
+   practical exposure is worse than reason 3 originally claimed: one caller
+   decodes attacker-controlled S3 object metadata.
 
    Note on provenance: `HashingUtils.cpp`, `PrecalculatedHash.{h,cpp}` and
    `aws/crt/Types.h` are all absent from `vendor/`, so none of these
@@ -361,6 +371,102 @@ return blockCount * 3 - padding;
 
 Rejecting `len % 4 != 0` outright would also work and is arguably more correct
 for a strict RFC 4648 decoder, but is a behaviour change for existing callers.
+
+---
+
+## Reachability — who actually calls `Decode`
+
+Everything above establishes that `Decode` mis-sizes its buffer. It does not
+establish that anything *feeds* it hostile input. That question was left open in
+earlier revisions of this report, for an honest reason: the caller set lives in
+the generated service clients, and this repo's `vendor/` tree holds 12 files.
+
+It has now been enumerated against a **full checkout at the pinned commit**
+`95988ca5` (v1.11.850). The numbers below cannot be re-derived from this repo
+alone — `vendor/` does not contain any of the files named — so they are recorded
+here with their paths for anyone who wants to check them against upstream.
+
+`HashingUtils::Base64Decode` is called **171 times across 74 generated service
+clients**, of which **40 are in `*Result.cpp`**, i.e. response deserialization.
+Three paths are worth separating, because they differ sharply in who controls
+the bytes.
+
+### 1. S3 Encryption Client — attacker-controlled object metadata
+
+This is the one that matters, and it is worse than "a consumer might misuse a
+public utility".
+
+`S3EncryptionClientBase::GetObjectInner`
+(`S3EncryptionClient.cpp:141`) issues a `HeadObject` and hands the result to
+`Handlers::MetadataHandler::ReadContentCryptoMaterial`
+(`S3EncryptionClient.cpp:186`; `MetadataHandler.cpp:103`), or to
+`InstructionFileHandler` (`:181`). That handler base64-decodes values taken
+straight from the object's **user metadata** (`DataHandler.cpp`):
+
+| Line | Metadata value decoded |
+|---|---|
+| `196` | message ID (V3 path) |
+| `197` | key commitment (V3 path) |
+| `201` | wrapped content-encryption key (`x-amz-key-v2` / V3 / deprecated) |
+| `232` | content IV |
+
+Whoever wrote the object controls those strings. And the decode runs **before
+any length or format validation** — the `finalCEK.GetLength()` checks against
+`AES_GCM_IV_BYTES + AES_GCM_KEY_BYTES + AES_GCM_TAG_BYTES` sit *after* the
+`Base64Decode` call that produced `finalCEK`. There is nothing between an
+attacker-authored metadata string and the defective decoder.
+
+So the trigger condition for B-1 — `len % 4 != 0`, trailing `'='`, `len >= 5` —
+is fully attacker-satisfiable here. Setting `x-amz-key-v2` to `"AAAA="` is
+enough.
+
+**This is not confined to deprecated code.** `GetObjectInner` is a member of
+`S3EncryptionClientBase`, so it is inherited by `S3EncryptionClientV3`
+(`S3EncryptionClient.h:241`) as well as by the V1/V2 clients that carry
+`AWS_DEPRECATED` ("in the maintenance mode, no new updates will be released",
+`S3EncryptionClient.h:140,185`). The V3-only fields at `DataHandler.cpp:196-197`
+are themselves proof that the current client reaches this code. Dismissing the
+finding as living in a deprecated module would be wrong.
+
+Not established, and worth stating: B-**2** via this path additionally requires a
+byte `>= 0x80` to survive transport as an HTTP header value, which was not
+tested. B-1 needs only base64-alphabet characters and `'='`, so it is unaffected
+by that doubt.
+
+### 2. S3 presigned URLs with SSE-C — caller-supplied key
+
+`S3Client::GeneratePresignedUrlWithSSEC` calls
+`Base64Decode(base64EncodedAES256Key)` on the application-supplied string with no
+validation, at `S3Client.cpp:2982` and `:2996`, and identically at
+`S3CrtClient.cpp:4067` and `:4081`. A well-formed 32-byte AES key encodes to 44
+characters (`44 % 4 == 0`) and is safe; a truncated or corrupted key ending in
+`'='` at a length that is not a multiple of 4 is not. This is a
+misconfiguration-triggered crash rather than an attack, but it is a public API
+decoding unvalidated input.
+
+### 3. Response deserialization — breadth, with a weaker threat model
+
+The 40 `*Result.cpp` sites decode blob fields out of service responses: KMS
+(`EncryptResult.cpp:27` `CiphertextBlob`, `SignResult.cpp:31` `Signature`,
+`GenerateDataKeyPairResult.cpp:27,31,35`), Lambda, DynamoDB, EC2, Bedrock,
+Textract, CloudTrail and others. A handful decode XML text rather than JSON —
+IAM `GetCredentialReportResult.cpp:35` and `VirtualMFADevice.cpp:34,39`, SNS
+`MessageAttributeValue.cpp:39`, SES `RawMessage.cpp:29`, EC2 `S3Storage.cpp:44`
+and `SecureBlobAttributeValue.cpp:29` — and `TransferManager.cpp:1274` decodes a
+checksum string.
+
+**A conforming AWS service returns well-formed base64**, so this path is not an
+attack on AWS's own endpoints. It requires a malicious, compromised or non-AWS
+endpoint; third-party S3-compatible services and TLS-terminating proxies are the
+realistic cases. Listed for blast radius, not as an independent vulnerability.
+
+### What is still not claimed
+
+No exploit was attempted beyond the crash. B-1 writes a single byte whose value
+is only partially attacker-controlled (6 bits of `value3`, 2 of `value4`); what
+that is worth depends on allocator behaviour and on what follows the allocation,
+neither of which was investigated. "Reachable with attacker-controlled input" is
+established; "exploitable" is not claimed either way.
 
 ---
 
