@@ -20,28 +20,38 @@
 ## Disclosure and upstream status
 
 Both defects were reported to AWS Security on **2026-07-29** under coordinated
-disclosure. AWS published an advisory for each on **2026-08-12**, crediting both
-reporters:
+disclosure. On **2026-08-12** AWS published a GitHub advisory and a CVE record
+for each, plus [Security Bulletin 2026-080-AWS](https://aws.amazon.com/security/security-bulletins/2026-080-aws/),
+crediting Lucas Carvalho Cordeiro and Rafael Sa Menezes of the University of
+Manchester:
 
-| Here | Advisory | CVE | CWE | CVSS 3.1 | Fixed in |
+| Here | Advisory | CVE | CWE | CVSS 3.1 | CVSS 4.0 |
 |---|---|---|---|---|---|
-| **B-1** heap overflow (WRITE) | [GHSA-wxx3-prfc-69xx](https://github.com/aws/aws-sdk-cpp/security/advisories/GHSA-wxx3-prfc-69xx) | CVE-2026-19642 | CWE-787 | 5.9 medium (`AV:N/AC:H/PR:L/UI:N/S:U/C:N/I:L/A:H`) | 1.11.862 |
-| **B-2** out-of-bounds READ | [GHSA-mxm9-xpf9-x66x](https://github.com/aws/aws-sdk-cpp/security/advisories/GHSA-mxm9-xpf9-x66x) | CVE-2026-19643 | CWE-125 | 5.3 medium (`AV:N/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:H`) | 1.11.862 |
+| **B-1** heap overflow (WRITE) | [GHSA-wxx3-prfc-69xx](https://github.com/aws/aws-sdk-cpp/security/advisories/GHSA-wxx3-prfc-69xx) | [CVE-2026-19642](https://www.cve.org/CVERecord?id=CVE-2026-19642) | CWE-787 | 5.9 medium (`AV:N/AC:H/PR:L/UI:N/S:U/C:N/I:L/A:H`) | 6.0 medium |
+| **B-2** out-of-bounds READ | [GHSA-mxm9-xpf9-x66x](https://github.com/aws/aws-sdk-cpp/security/advisories/GHSA-mxm9-xpf9-x66x) | [CVE-2026-19643](https://www.cve.org/CVERecord?id=CVE-2026-19643) | CWE-125 | 5.3 medium (`AV:N/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:H`) | 6.0 medium |
 
-Both give the affected range as `<= 1.11.861` — which contains the 1.11.850 tree
-analysed here — and state that no configuration or runtime option avoids either
-issue, so upgrading is the only remedy. AWS notes that remote code execution has
-not been demonstrated for B-1.
+Amazon (AMZN) is the assigning CNA for both. All three channels give the
+affected range as `<= 1.11.861` — which contains the 1.11.850 tree analysed
+here — fix it in **[1.11.862](https://github.com/aws/aws-sdk-cpp/releases/tag/1.11.862)**
+(tagged 2026-08-03), and state that no configuration or runtime option avoids
+either issue, so upgrading is the only remedy. AWS notes that remote code
+execution has not been demonstrated for B-1.
+
+The CVE record for B-2 is titled "Out-of-bounds read in the Base64 decoder in
+Amazon aws-sdk-cpp **on signed-char platforms**", which is the same scoping the
+"Is it real?" discussion below arrives at independently: the defect is real
+where `char` is signed and benign where it is not.
 
 **The fix is a replacement, not a repair.**
 [PR aws/aws-sdk-cpp#3882](https://github.com/aws/aws-sdk-cpp/pull/3882)
 (`8eeac049c3`, merged 2026-08-03) deletes the hand-written codec and forwards
 `Encode`, `Decode` and both length calculations to `Aws::Crt::Base64*` in the
-AWS Common Runtime — 126 lines of index arithmetic deleted from `Base64.cpp`, 26
-lines of forwarding added. Neither minimal patch suggested below was taken; both
-defects are removed along with the code that carried them. Both advisories add
-that consumers who vendor or statically link the SDK must confirm their build
-picks up the updated `aws-crt-cpp` submodule, not only the updated SDK sources.
+[AWS Common Runtime](https://github.com/awslabs/aws-crt-cpp) — 126 lines of
+index arithmetic deleted from `Base64.cpp`, 26 lines of forwarding added.
+Neither minimal patch suggested below was taken; both defects are removed along
+with the code that carried them. Both advisories add that consumers who vendor
+or statically link the SDK must confirm their build picks up the updated
+`aws-crt-cpp` submodule, not only the updated SDK sources.
 
 That PR also adds `TestBase64DecodeNeverWritesMoreThanCalculatedLength`
 (`tests/aws-cpp-sdk-core-tests/utils/HashingUtilsTest.cpp`), asserting
@@ -363,7 +373,9 @@ The signal is caused by a READ memory access.
 Yes, with one portability caveat worth stating honestly: **it depends on `char`
 being signed.** On x86-64 Linux/GCC and Clang it is, so the SDK is affected on
 its most common server platform. On ARM (where `char` is unsigned by default)
-the same code is benign, as it is under `-funsigned-char`.
+the same code is benign, as it is under `-funsigned-char`. AWS scoped
+CVE-2026-19643 the same way, down to the title — "… **on signed-char
+platforms**".
 
 This is where the symbolic run earns its keep. Re-running `make asan` on
 arm64 macOS reports `ok` for all four high-bit inputs — the wild address happens

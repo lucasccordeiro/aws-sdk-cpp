@@ -11,4 +11,7 @@ confirmed here, reported to AWS Security on 2026-07-29, and published on
 [CVE-2026-19642](https://github.com/aws/aws-sdk-cpp/security/advisories/GHSA-wxx3-prfc-69xx)
 (heap buffer overflow, write) and
 [CVE-2026-19643](https://github.com/aws/aws-sdk-cpp/security/advisories/GHSA-mxm9-xpf9-x66x)
-(out-of-bounds read). Both affect `<= 1.11.861` and are fixed in **1.11.862**.
+(out-of-bounds read), and covered by
+[Security Bulletin 2026-080-AWS](https://aws.amazon.com/security/security-bulletins/2026-080-aws/).
+Both affect `<= 1.11.861` and are fixed in
+**[1.11.862](https://github.com/aws/aws-sdk-cpp/releases/tag/1.11.862)**.

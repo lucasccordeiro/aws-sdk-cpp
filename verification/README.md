@@ -11,8 +11,10 @@ Both were reported to AWS Security on 2026-07-29 and are now published as
 [CVE-2026-19642](https://github.com/aws/aws-sdk-cpp/security/advisories/GHSA-wxx3-prfc-69xx)
 (B-1, write) and
 [CVE-2026-19643](https://github.com/aws/aws-sdk-cpp/security/advisories/GHSA-mxm9-xpf9-x66x)
-(B-2, read), affecting `<= 1.11.861` and fixed in **1.11.862**, which delegates
-the codec to `aws-crt-cpp`.
+(B-2, read), affecting `<= 1.11.861` and fixed in
+**[1.11.862](https://github.com/aws/aws-sdk-cpp/releases/tag/1.11.862)**, which
+delegates the codec to `aws-crt-cpp`. AWS also issued
+[Security Bulletin 2026-080-AWS](https://aws.amazon.com/security/security-bulletins/2026-080-aws/).
 
 ## Layout
 
