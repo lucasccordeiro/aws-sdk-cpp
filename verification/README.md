@@ -7,6 +7,13 @@ Bounded-model-checking and sanitizer harnesses for the hand-written codecs in
 confirmed in `Base64::Decode`: a heap buffer overflow (write) and an
 out-of-bounds read.
 
+Both were reported to AWS Security on 2026-07-29 and are now published as
+[CVE-2026-19642](https://github.com/aws/aws-sdk-cpp/security/advisories/GHSA-wxx3-prfc-69xx)
+(B-1, write) and
+[CVE-2026-19643](https://github.com/aws/aws-sdk-cpp/security/advisories/GHSA-mxm9-xpf9-x66x)
+(B-2, read), affecting `<= 1.11.861` and fixed in **1.11.862**, which delegates
+the codec to `aws-crt-cpp`.
+
 ## Layout
 
 ```
@@ -26,6 +33,8 @@ stubs/          verification-only substitutes, each documenting what it replaces
 vendor/         PRISTINE upstream sources. Never edited by hand.
                 UPSTREAM_COMMIT / UPSTREAM_VERSION pin the provenance.
                 Both ESBMC and the ASan build analyse exactly this tree.
+                Pinned at the vulnerable 1.11.850; bumping it to 1.11.862 or
+                later stops every target below reproducing.
 
 esbmc_bug_repros/   reproducers for the ESBMC issues hit along the way
 results/            build outputs and logs (regenerated; safe to delete)

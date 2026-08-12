@@ -17,6 +17,52 @@
 
 ---
 
+## Disclosure and upstream status
+
+Both defects were reported to AWS Security on **2026-07-29** under coordinated
+disclosure. AWS published an advisory for each on **2026-08-12**, crediting both
+reporters:
+
+| Here | Advisory | CVE | CWE | CVSS 3.1 | Fixed in |
+|---|---|---|---|---|---|
+| **B-1** heap overflow (WRITE) | [GHSA-wxx3-prfc-69xx](https://github.com/aws/aws-sdk-cpp/security/advisories/GHSA-wxx3-prfc-69xx) | CVE-2026-19642 | CWE-787 | 5.9 medium (`AV:N/AC:H/PR:L/UI:N/S:U/C:N/I:L/A:H`) | 1.11.862 |
+| **B-2** out-of-bounds READ | [GHSA-mxm9-xpf9-x66x](https://github.com/aws/aws-sdk-cpp/security/advisories/GHSA-mxm9-xpf9-x66x) | CVE-2026-19643 | CWE-125 | 5.3 medium (`AV:N/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:H`) | 1.11.862 |
+
+Both give the affected range as `<= 1.11.861` — which contains the 1.11.850 tree
+analysed here — and state that no configuration or runtime option avoids either
+issue, so upgrading is the only remedy. AWS notes that remote code execution has
+not been demonstrated for B-1.
+
+**The fix is a replacement, not a repair.**
+[PR aws/aws-sdk-cpp#3882](https://github.com/aws/aws-sdk-cpp/pull/3882)
+(`8eeac049c3`, merged 2026-08-03) deletes the hand-written codec and forwards
+`Encode`, `Decode` and both length calculations to `Aws::Crt::Base64*` in the
+AWS Common Runtime — 126 lines of index arithmetic deleted from `Base64.cpp`, 26
+lines of forwarding added. Neither minimal patch suggested below was taken; both
+defects are removed along with the code that carried them. Both advisories add
+that consumers who vendor or statically link the SDK must confirm their build
+picks up the updated `aws-crt-cpp` submodule, not only the updated SDK sources.
+
+That PR also adds `TestBase64DecodeNeverWritesMoreThanCalculatedLength`
+(`tests/aws-cpp-sdk-core-tests/utils/HashingUtilsTest.cpp`), asserting
+`Base64Decode(input).GetLength() <= CalculateBase64DecodedLength(input)` over
+`"AAAA="`, `"AAAAA="`, `"AAAAAA="`, `"AAAAAAA="` and every byte `0x80`-`0xFF`
+prefixed to `"AAA"` — the B-1 and B-2 triggering classes respectively.
+
+**On reachability**, both advisories state that "the decoder is reachable from
+the generated C++ service clients, which use it for a variety of features."
+That is the vendor's assertion, and it settles the question for practical
+purposes; it is not an independent result of this exercise. The caveat under
+"Is it real?" below still describes what was checked *here* — this repo's sparse
+`vendor/` checkout contains no generated client, so no caller was enumerated
+locally.
+
+`vendor/` deliberately stays pinned at the vulnerable 1.11.850 tree: every
+harness and every verdict below is a statement about pre-fix code, and updating
+it to 1.11.862 would silently turn the confirmations into non-reproductions.
+
+---
+
 ## Summary
 
 Two memory-safety defects were found in `Base64::Decode`, both reachable from
@@ -25,8 +71,8 @@ argument:
 
 | # | Defect | Effect | Trigger |
 |---|--------|--------|---------|
-| **B-1** | Output buffer sized by one rule, written by another | **Heap buffer overflow (WRITE)**, 1 byte past the allocation | `"AAAA="`, `"AAAA=="`, `"AAAAAAAA="` — any input whose length is not a multiple of 4 and which ends in `'='` |
-| **B-2** | `char` sign-extended before indexing a 256-entry table | **Wild out-of-bounds READ** → SEGV | any byte ≥ `0x80`, e.g. `\xFF\xFF\xFF\xFF` |
+| **B-1** (CVE-2026-19642) | Output buffer sized by one rule, written by another | **Heap buffer overflow (WRITE)**, 1 byte past the allocation | `"AAAA="`, `"AAAA=="`, `"AAAAAAAA="` — any input whose length is not a multiple of 4 and which ends in `'='` |
+| **B-2** (CVE-2026-19643) | `char` sign-extended before indexing a 256-entry table | **Wild out-of-bounds READ** → SEGV | any byte ≥ `0x80`, e.g. `\xFF\xFF\xFF\xFF` |
 
 Both were **confirmed with a concrete reproducer under AddressSanitizer**, not
 merely predicted. Neither is an artefact of an under-constrained harness — see
@@ -254,7 +300,10 @@ Real. Three independent reasons:
    clients, which are **not** in this repo's 12-file sparse `vendor/`
    checkout and were therefore never enumerated here. Treat "reachable from
    public API" as established and "here is who calls it in practice" as
-   unverified.
+   unverified *locally* — AWS's advisories now state that the decoder is
+   reachable from the generated service clients (see "Disclosure and upstream
+   status"), which answers the question on the vendor's authority rather than
+   on evidence in this repo.
 
    Note on provenance: `HashingUtils.cpp`, `PrecalculatedHash.{h,cpp}` and
    `aws/crt/Types.h` are all absent from `vendor/`, so none of these
@@ -361,6 +410,10 @@ return blockCount * 3 - padding;
 
 Rejecting `len % 4 != 0` outright would also work and is arguably more correct
 for a strict RFC 4648 decoder, but is a behaviour change for existing callers.
+
+**Upstream took neither.** 1.11.862 replaces the whole implementation with the
+AWS Common Runtime's, so both defects go away with the arithmetic that produced
+them — see "Disclosure and upstream status".
 
 ---
 
