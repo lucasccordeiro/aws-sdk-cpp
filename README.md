@@ -15,3 +15,7 @@ confirmed here, reported to AWS Security on 2026-07-29, and published on
 [Security Bulletin 2026-080-AWS](https://aws.amazon.com/security/security-bulletins/2026-080-aws/).
 Both affect `<= 1.11.861` and are fixed in
 **[1.11.862](https://github.com/aws/aws-sdk-cpp/releases/tag/1.11.862)**.
+
+A short public write-up of the exercise was
+[posted on 2026-08-13](https://www.linkedin.com/posts/lucas-cordeiro-3156233_formalverification-memorysafety-esbmc-share-7493503595426963457-OZeH/),
+with AWS's permission.
