@@ -218,6 +218,13 @@ The pair is also what rules out vacuity: the two runs differ only in the length
 bound, so the `SUCCESSFUL` one cannot be passing because the harness fails to
 reach the code — the identical harness fails one character later.
 
+The `MAXLEN = 33` proof rests on Bitwuzla alone, and not for want of trying: the
+same query under Z3 was still running at the 900 s cap (`ERROR: Timed out`) with
+3.4 GB resident, against Bitwuzla's 79 s. Finding a counterexample is the easy
+direction — every `FAILED` row above lands in seconds to a couple of minutes —
+whereas discharging all 1463 remaining VCCs is where the solvers diverge. So the
+safety half of the bracket is a single-solver result; the defect half is not.
+
 Both symbolic modes exclude the `0x`/`0X` prefix (`x` is not in the assumed hex
 alphabet). That path only *shortens* the decoded body by one byte, so it can
 neither create an overflow the model misses nor weaken the ≤ 33 proof.
