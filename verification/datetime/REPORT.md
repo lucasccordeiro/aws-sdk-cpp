@@ -25,8 +25,12 @@ The only input-length guard is `len > MAX_LEN` with `MAX_LEN == 100`
 Signed overflow is UB — C++ [expr.arith.conv]/[basic.fundamental]; `int` is not
 required to wrap.
 
-Accumulator sites: RFC822 `:482,530,545,560,575`; ISO_8601 `:751,767,783,799,815,837`;
-ISO_8601_BASIC `:949,966,988,999,1015,1031`.
+Of the 17 accumulation sites, 12 sit in states that advance on a **delimiter**
+and can therefore be fed unlimited digits — RFC822 `:482,530,545,560,575`,
+ISO_8601 `:751,767,783,799,815,837`, ISO_8601_BASIC `:988`. The other 5 —
+ISO_8601_BASIC `:949,966,999,1015,1031` — advance on a **digit count**
+(`if (index - stateStartIndex == N) { m_state++; }`), are self-bounding, and do
+not overflow.
 
 ### Two distinct overflows, with different trigger thresholds
 
