@@ -345,6 +345,14 @@ is. **Defensive-coding observation, not a defect** — recorded because "assert-
 guard on a length that feeds a `memcpy`" is exactly the shape of U-1, and the
 difference between the two is worth being explicit about.
 
+Two caveats on this one. The CRT quotes are from `aws-c-event-stream` at `main`,
+not at whatever commit the 1.11.869 submodule chain pins, so the invariant is
+verified for current upstream rather than for that exact build; and the argument
+is a source reading, not a machine-checked proof — the SDK side depends on a
+CRT-side invariant that no compiler or verifier here enforces across the
+boundary. If the CRT ever routed UUID through `s_read_header_value_len`, the
+SDK's release build would follow it without complaint.
+
 One curiosity while confirming this: the type-mismatch branch of
 `GetEventHeaderValueAsUuid()` returns `Aws::Utils::UUID(uuid)` from a local
 `char uuid[32] = {0}` — the U-1 string constructor on an empty `Aws::String`,
