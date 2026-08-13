@@ -5,8 +5,10 @@ current release at the time of writing)
 **Function under analysis:** `Aws::Utils::UUID::UUID(const Aws::String&)`
 (`src/aws-cpp-sdk-core/source/utils/UUID.cpp:34-44`)
 **Cross-check:** GCC + AddressSanitizer/UBSan (`make asan`)
-**Status:** ASan-confirmed on 1.11.869. ESBMC symbolic harness and a
-reachability pass are the next steps (see "Open items").
+**Status:** ASan-confirmed on 1.11.869. Reachability enumerated against the full
+SDK tree — no untrusted-input caller of the string constructor exists (see
+"Reachability"), so U-1 is a latent hardening bug, not a remotely triggerable
+one. ESBMC symbolic harness is the remaining next step (see "Open items").
 
 ---
 
@@ -140,21 +142,56 @@ if (rawUuid.GetLength() != sizeof(m_uuid)) { /* reject: throw / empty / flagged-
 memcpy(m_uuid, rawUuid.GetUnderlyingData(), sizeof(m_uuid));
 ```
 
+## Reachability
+
+The `vendor/` checkout here contains no callers, so the caller set was
+enumerated against the full SDK tree at 1.11.869 (GitHub code search plus
+reading each hit). The question is specifically who constructs
+`Aws::Utils::UUID` **from a string** — the only constructor that runs the
+overflowing `memcpy`; the separate `UUID(const unsigned char[16])` binary
+constructor always copies exactly `sizeof(m_uuid)` and is not U-1.
+
+What the caller set looks like:
+
+* **Generation, not parsing.** The in-`core` constructions —
+  `AsyncCallerContext` (`PseudoRandomUUID`), `STSCredentialsProvider`,
+  `TransferHandle`, `S3ExpressSigner` — all call `RandomUUID()` /
+  `PseudoRandomUUID()`. They produce a UUID; they never parse a caller-supplied
+  string, so they cannot reach U-1.
+* **Wire-sourced UUIDs use the binary constructor.** The event-stream decoder
+  path (`EventHeader.h`) turns a UUID-typed header into
+  `Aws::Utils::UUID(buffer.GetUnderlyingData())` — the 16-byte binary
+  constructor, whose copy length is fixed by the code, not by the header. That
+  path does not reach the string constructor.
+* **The one string-constructor call site in `core`** is the error branch of
+  `EventHeaderValue::GetEventHeaderValueAsUuid()` (`EventHeader.h`), which passes
+  a fixed local `char[32] = {0}` — an empty string after decode, so a zero-byte
+  copy. Safe, and not attacker-influenced.
+* **Generated service clients store UUIDs as `Aws::String`**, not as
+  `Aws::Utils::UUID`. The model setters/parsers keep the value as a string; none
+  of the model `.cpp` files construct `Aws::Utils::UUID` from a response field.
+
+**Conclusion: no untrusted-input caller of `UUID(const Aws::String&)` exists in
+the SDK.** U-1 is a real memory-safety defect in the function, but it is a
+latent robustness/hardening bug rather than a remotely triggerable one: the only
+way to hit it is for an SDK *consumer* to pass an unvalidated, over-length string
+to the public constructor. This is a *negative* result — it hands out no exploit
+path — which is why it is recorded in the open rather than withheld. It is
+argued from the caller set, not machine-checked; a directed re-scan of any
+future release should repeat it.
+
 ## Open items
 
 * **ESBMC symbolic harness.** Bound a symbolic `Aws::String` and prove the
   overflow follows from the length arithmetic over a class of inputs, as was
   done for Base64 B-1 — reusing this repo's `ESBMC_OM_MISSING_ALLOCATE_SHARED`
   shim. Not yet built.
-* **Reachability.** Enumerate in-tree callers of `UUID(const Aws::String&)`
-  reachable from untrusted input (server responses, headers, user-supplied
-  identifiers). The sparse `vendor/` checkout here contains no callers, so this
-  is unverified locally — treat "no enforced precondition on a public
-  constructor" as established and practical reachability as open, exactly as the
-  Base64 report did before AWS confirmed it.
-* **Disclosure.** If reachability from untrusted input holds, this is a
-  coordinated-disclosure candidate for AWS Security, not a public issue — see
-  the channel rules in the top-level `verification/`.
+* **Disclosure.** Given the negative reachability result above, U-1 does not meet
+  the bar that made the Base64 defects coordinated-disclosure cases (reachable
+  from untrusted input). It is treated as a public hardening finding. Should a
+  future caller parse an untrusted string into `UUID`, revisit: that would make
+  it a coordinated-disclosure candidate for AWS Security, not a public issue —
+  see the channel rules in the top-level `verification/`.
 
 ---
 

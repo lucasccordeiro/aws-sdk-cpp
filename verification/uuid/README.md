@@ -10,9 +10,13 @@ using the *input-derived* length, guarded only by `assert`s that vanish under
 `NDEBUG`, so a string whose de-dashed hex body exceeds 32 characters overflows
 `m_uuid`.
 
-Not yet reported to AWS: reachability from untrusted input has not been
-established here (see REPORT.md "Open items"). If it is, this goes to AWS
-Security under coordinated disclosure, not a public issue.
+Reachability was enumerated against the full SDK tree at 1.11.869: no
+untrusted-input caller of the string constructor exists — wire-sourced UUIDs use
+the separate 16-byte binary constructor, and service clients keep UUIDs as
+`Aws::String` rather than parsing them into `Aws::Utils::UUID`. So U-1 is a
+latent hardening bug, not a remotely triggerable one (see REPORT.md
+"Reachability"), and is handled as a public finding rather than a coordinated
+disclosure.
 
 ## Layout
 
