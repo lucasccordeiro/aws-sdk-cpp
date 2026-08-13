@@ -148,13 +148,19 @@ representation saturates ≈292 years after the epoch. `DateTime` converts a par
 `tm` into a `time_point` with no range check, so the seconds→nanoseconds
 `duration_cast` (`bits/chrono.h:225`) overflows for any date past the boundary.
 
-Boundary measured exactly — **2262-04-11** is the last clean day:
+The representable window was measured from both ends —
+**1677-09-22 through 2262-04-11**. Anything outside it overflows:
 
 ```
-2262-04-11T00:00:00Z   clean
+1677-09-21T00:00:00Z   signed integer overflow
+1677-09-22T00:00:00Z   clean
 2262-04-11T23:47:16Z   clean
 2262-04-12T00:00:00Z   signed integer overflow
 ```
+
+The lower bound matters as well as the upper: historical timestamps before 1677
+— a plausible `Last-Modified` or an archival date in a JSON/XML body — overflow
+just as readily. `0001-01-01T00:00:00Z` parses "successfully" to a wrapped value.
 
 ### Why this matters more than D-1
 
@@ -181,6 +187,28 @@ I have **not** shown that any specific caller makes a security decision on that
 should not be made without evidence. The demonstrated facts are the UB, the
 inversion, and the reachability.
 
+### The clock-skew path is *not* an escalation — negative result
+
+`AdjustClockSkew` was the obvious place to look for downstream impact, and it
+does take the bad branch: `WasParseSuccessful()` returns true, `Diff` against the
+signing timestamp yields ≈-186 years, that clears the ±4 minute
+`TIME_DIFF_MAX`/`MIN` gate (`AWSClient.cpp:72-74,250`), and `SetClockSkew` stores
+the garbage offset for subsequent signing.
+
+It is still not worth reporting as an escalation, because **a perfectly valid
+`Date` header already grants the same power by design** — trusting the server's
+clock is what the feature is for, and a valid in-range date can move the skew by
+up to ~236 years anyway. The overflow buys an attacker nothing here.
+
+`DateTime::Diff` itself was checked separately and adds no UB of its own
+(`DateTimeCommon.cpp:1412`): it subtracts two already-wrapped `time_point`s and
+the result stays in range. Do not re-litigate either of these.
+
+What distinguishes D-2 from ordinary designed trust is therefore narrower and
+should be stated as such: the abort in hardened builds, and the sign inversion on
+`Expires`, where the value comes from another *user* rather than from the
+endpoint the client has chosen to trust.
+
 ### Platform caveat
 
 This is a **Linux/libstdc++ finding**. `libc++` uses a microsecond
@@ -199,10 +227,26 @@ aborts on unfixed ones — confirmed aborting against 1.11.869 on 2026-08-13.
 
 ## Suggested fixes
 
-**D-1** — bound each accumulator by digit count before multiplying. The ISO
-parsers already know the expected field width, and RFC822 day is 1–2 digits per
-RFC 5322 §3.3. Rejecting a field that exceeds its width both removes the UB and
-makes RFC822 agree with the ISO parsers on rejecting malformed input.
+**D-1 — written and validated: `fix/d1-bound-field-widths.patch`.** Bounds each
+of the 12 delimiter-driven accumulators by its field width
+(`isdigit(c) && index - stateStartIndex < N`), so a digit past the field falls
+through to the existing `else` and sets `m_error`. Widths are 4 for the ISO year
+and the RFC822 4-digit year, 2 elsewhere — RFC 5322 §3.3 gives the RFC822 day as
+1–2 digits. The 5 count-driven states are untouched. 12 hunks; applies clean to
+the pristine 1.11.869 file.
+
+Validated two ways, both on 2026-08-13:
+
+- **UB removed.** All D-1 reproducers (RFC822 10- and 20-digit day, ISO_8601,
+  ISO_8601_BASIC, AutoDetect) run clean under `-fno-sanitize-recover=all` and
+  now return `valid=0` instead of overflowing.
+- **No over-rejection.** A 19-case corpus of valid input — 1- and 2-digit RFC822
+  days, 2- and 4-digit RFC822 years, fractional seconds to 9 places, `+05:30` /
+  `-08:00` offsets, ISO_8601_BASIC, AutoDetect, epoch, year 0001 — produces
+  byte-identical `valid`/`millis` against patched and pristine sources. A fix
+  that tightened parsing would be worse than the bug; this one does not.
+
+This patch does **not** address D-2, which is a separate defect.
 
 **D-2** — range-check before converting to `time_point`. The remedy is a
 compatibility decision that belongs to AWS, not to this report: rejecting
