@@ -9,6 +9,8 @@
  * overflowing memcpy past m_uuid[16] is caught at runtime.
  */
 
+#include "../../stubs/esbmc_compat.h"
+
 #include <cstdlib>
 
 #include <aws/core/utils/memory/MemorySystemInterface.h>

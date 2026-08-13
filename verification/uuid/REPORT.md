@@ -5,10 +5,12 @@ current release at the time of writing)
 **Function under analysis:** `Aws::Utils::UUID::UUID(const Aws::String&)`
 (`src/aws-cpp-sdk-core/source/utils/UUID.cpp:34-44`)
 **Cross-check:** GCC + AddressSanitizer/UBSan (`make asan`)
-**Status:** ASan-confirmed on 1.11.869. Reachability enumerated against the full
-SDK tree — no untrusted-input caller of the string constructor exists (see
-"Reachability"), so U-1 is a latent hardening bug, not a remotely triggerable
-one. ESBMC symbolic harness is the remaining next step (see "Open items").
+**Status:** ASan-confirmed and ESBMC-confirmed on 1.11.869, the two agreeing on
+both the release and the debug outcome, with the symbolic counterexample
+replayed natively (see "Symbolic confirmation"). Reachability enumerated against
+the full SDK tree — no untrusted-input caller of the string constructor exists
+(see "Reachability"), so U-1 is a latent hardening bug, not a remotely
+triggerable one.
 
 ---
 
@@ -23,7 +25,9 @@ only by `assert`s that vanish under `NDEBUG`:
 | **U-1** | Output copied into `m_uuid[16]` with a length taken from the input, not the buffer | **Heap/stack buffer overflow (WRITE)**, up to input-length/2 − 16 bytes past the allocation | any string whose de-dashed hex body exceeds 32 characters, e.g. a UUID-shaped `8-4-4-4-16` string, or a bare 40-hex-char string |
 
 Confirmed with a concrete reproducer under AddressSanitizer against
-byte-for-byte upstream `UUID.cpp` — not merely predicted.
+byte-for-byte upstream `UUID.cpp` — not merely predicted — and independently by
+ESBMC over a symbolic input, which also fixes the boundary: 34 characters is the
+shortest string that overflows.
 
 ## U-1 — Buffer overflow in the UUID string constructor
 
@@ -74,6 +78,7 @@ memcpy(m_uuid /*16*/, ..., 18)     -> writes 2 bytes past a 16-byte allocation
 AAAA                                           ok            (2 bytes)
 0xAABBCCDD                                     ok            (0x prefix, 4 bytes)
 12345678-1234-1234-1234-1234567890123456       heap-buffer-overflow
+123456781234123412345678901234561234           heap-buffer-overflow   (36 hex -> 18 bytes; length 36 PASSES the first assert)
 1234567890123456789012345678901234567890       heap-buffer-overflow   (40 bare hex -> 20 bytes)
 0xAABBCCDDEEFF00112233445566778899AABBCCDDEEFF heap-buffer-overflow
 ```
@@ -99,10 +104,13 @@ object.
 
 Same split as any assert-guarded overflow:
 
-* **Debug build** — the first `assert(uuidToConvert.length() == UUID_STR_SIZE)`
-  fires: `Assertion 'uuidToConvert.length() == UUID_STR_SIZE' failed`. A
-  controlled crash. `make asan` shows this on the over-length inputs in the
-  "debug semantics" block.
+* **Debug build** — one of the two asserts fires and the crash is controlled.
+  Which one depends on the input, and the difference matters: a string longer
+  than 36 characters trips the first,
+  `assert(uuidToConvert.length() == UUID_STR_SIZE)`, but a 36-character
+  dash-free string passes that one and is caught only by the second,
+  `assert(escapedHexStr.length() == UUID_BINARY_SIZE * 2)`. `make asan` shows
+  both in the "debug semantics" block.
 * **Release build (`NDEBUG`)** — both asserts are compiled out and the overflow
   is **silent memory corruption**.
 
@@ -141,6 +149,121 @@ runtime rather than only under `assert`:
 if (rawUuid.GetLength() != sizeof(m_uuid)) { /* reject: throw / empty / flagged-invalid */ }
 memcpy(m_uuid, rawUuid.GetUnderlyingData(), sizeof(m_uuid));
 ```
+
+## Symbolic confirmation (ESBMC)
+
+The ASan work above pins U-1 to named inputs. The ESBMC harnesses answer the
+next question: does the overflow follow from the length arithmetic over a
+*class* of inputs, rather than from the particular strings someone thought to
+try?
+
+### Configuration, and why each flag is there
+
+| Flag | Why |
+|---|---|
+| `--no-assertions` | **Release semantics.** Both length constraints in the constructor are `assert`s. With them live, ESBMC stops at one of them and never reaches the `memcpy` — the debug behaviour, kept as its own target (`make esbmc-debug`). Bounds and pointer checks are unaffected. |
+| `--unwind 40`, unwinding assertions **on** | 40 covers every real trip count (36-character string loops, 18-iteration `HexDecode` and copy loops). Unwinding assertions are left enabled so an inadequate bound surfaces as a violated unwinding assertion instead of a silent false `SUCCESSFUL`. |
+| `--unwindsetname …StringUtils@Replace:0:2` | See below. |
+| `--force-malloc-success` | Suppresses the allocation-failure counterexample from the `Aws::Malloc` stub, which otherwise masks the defect under test. |
+
+**The one per-loop bound.** `StringUtils::Replace` is
+`for (pos = 0;; pos += replaceLength)` with `replaceLength == strlen("") == 0`
+— unbounded, exiting only when `find` returns `npos`. ESBMC's OM keeps a
+heap-allocated string's contents in a symbolic array, so `find` yields a
+symbolic index *even for a fully concrete input*, and symex unrolls the loop to
+the global bound with `find`, `erase` and `insert` — seven nested loops — inside
+every iteration. At `--unwind 64` that is a >20-minute run past 1 GB of symex
+state before the solver is ever reached. Bounding this one loop to 2 brings the
+same query to ~3 s of symex.
+
+That bound is an assumption, so it is *checked rather than asserted*: unwinding
+assertions stay on, and the control run below returns `SUCCESSFUL` under exactly
+these flags. A `SUCCESSFUL` verdict with unwinding assertions enabled is only
+possible if every loop bound in the run, this one included, was adequate. This
+is why `--no-unwinding-assertions` is not used anywhere here, unlike the Base64
+harnesses.
+
+### Results
+
+All runs against byte-for-byte upstream `UUID.cpp`. The concrete pair — the
+defect verdict and the control that keeps it non-vacuous — was run under both
+Bitwuzla and Z3 and they agree; the rest are Bitwuzla, noted per row.
+
+| Run | Input model | Verdict | Property |
+|---|---|---|---|
+| `confirm` | 36 hex chars, no dashes (concrete) | **FAILED** (Bitwuzla + Z3) | `dereference failure: Access to object out of bounds`, `allocationSize = 18` |
+| `confirm` control | 32 hex chars → exactly 16 bytes (concrete) | **SUCCESSFUL** (Bitwuzla + Z3) | — |
+| `esbmc-debug` | same as `confirm`, asserts live | **FAILED** (Bitwuzla) | `assertion escapedHexStr.length() == UUID_BINARY_SIZE * 2` (`UUID.cpp:41`) |
+| `esbmc` ANY_LEN | length symbolic in [0, 36], bytes symbolic hex | **FAILED** (Bitwuzla) | out-of-bounds write; witness `len = 36`, 18 bytes decoded |
+| `esbmc` CONTRACT | length pinned at 36, bytes symbolic hex | **FAILED** (Bitwuzla) | out-of-bounds write; witness `077777777700777777777777777777777777` |
+| `esbmc` ANY_LEN, `MAXLEN=33` | length symbolic in [0, 33] | **SUCCESSFUL** (Bitwuzla) | — |
+| `esbmc` ANY_LEN, `MAXLEN=34` | length symbolic in [0, 34] | **FAILED** (Bitwuzla) | out-of-bounds write; witness `8891D54447710000ee7cCd888777777777`, `len = 34` |
+
+### The boundary, machine-checked
+
+The last two rows bracket the defect exactly. `HexDecode` returns an empty
+buffer for an odd-length or shorter-than-2 argument and `floor(hexChars / 2)`
+bytes otherwise, so 32 characters give exactly 16 bytes — a full `m_uuid` and
+still safe — 33 gives nothing, and 34 gives 17. Running the same harness at
+`MAXLEN = 33` and `MAXLEN = 34` turns that arithmetic into a checked claim:
+
+* **≤ 33 characters: SUCCESSFUL.** Over *every* dash-free hex string of length 0
+  to 33 — not a sample — the constructor is memory-safe. Unwinding assertions
+  are on, so this is a real bounded proof rather than a truncated run.
+* **≤ 34 characters: FAILED**, with a 34-character witness. 34 is therefore the
+  minimal overflowing length, and the failing verdict is not an artefact of
+  handing the harness an absurdly long string.
+
+The pair is also what rules out vacuity: the two runs differ only in the length
+bound, so the `SUCCESSFUL` one cannot be passing because the harness fails to
+reach the code — the identical harness fails one character later.
+
+Both symbolic modes exclude the `0x`/`0X` prefix (`x` is not in the assumed hex
+alphabet). That path only *shortens* the decoded body by one byte, so it can
+neither create an overflow the model misses nor weaken the ≤ 33 proof.
+
+### What the symbolic runs add over ASan
+
+**The documented precondition is not sufficient.** Every over-length input the
+ASan table originally carried was *also* longer than 36 characters, so each one
+violates the constructor's first assert — from which a reader could conclude
+that a caller who checks `length() == 36`, the one constraint the API documents
+(`UUID_STR_SIZE`, and the comment "2 characters per byte + 4 dashes = 36
+bytes"), is safe. It is not. The ESBMC input is 36 characters exactly, passes
+that assert, and overflows anyway, because the load-bearing check is the
+*second* assert on the de-dashed length. `esbmc-debug` shows this directly: with
+asserts live the violation reported is `UUID.cpp:41`, not `:37`. CONTRACT mode
+makes it a statement about the whole class — over all 36-character dash-free hex
+strings, the copy is out of bounds. That case has since been added to the ASan
+table too, where it behaves identically.
+
+**The counterexample is a real input, not a model artefact.** Replaying the
+CONTRACT witness against the *native* ASan build reproduces the defect at the
+same site:
+
+```
+$ ./results/uuid_asan_ndebug 077777777700777777777777777777777777
+ERROR: AddressSanitizer: heap-buffer-overflow
+WRITE of size 18 at 0x502000000020
+    #2 Aws::Utils::UUID::UUID(...) vendor/source/utils/UUID.cpp:43
+0x502000000020 is located 0 bytes after 16-byte region
+```
+
+The two tools also agree on the debug half: ASan reports
+`Assertion 'escapedHexStr.length() == UUID_BINARY_SIZE * 2' failed` for this
+input, which is the property ESBMC names at `UUID.cpp:41`.
+
+### Provenance
+
+**Tool:** ESBMC 8.4.0, master `b1fa394aa4`. As with the Base64 run, the binary
+came from a working tree carrying *uncommitted local changes* — here to
+`src/pointer-analysis/value_set.cpp`, which is on the path for the very
+dereference checks these verdicts rest on. The binary was copied aside and every
+run above was executed against that one pinned copy, so the runs are internally
+consistent; the verdicts are additionally corroborated by two independent
+solvers and by the native ASan replay, which does not involve ESBMC at all. The
+VCC counts, however, are not reproducible from the pinned commit alone. Re-run
+against a clean build before quoting numbers anywhere they matter.
 
 ## Reachability
 
@@ -182,10 +305,6 @@ future release should repeat it.
 
 ## Open items
 
-* **ESBMC symbolic harness.** Bound a symbolic `Aws::String` and prove the
-  overflow follows from the length arithmetic over a class of inputs, as was
-  done for Base64 B-1 — reusing this repo's `ESBMC_OM_MISSING_ALLOCATE_SHARED`
-  shim. Not yet built.
 * **Disclosure.** Given the negative reachability result above, U-1 does not meet
   the bar that made the Base64 defects coordinated-disclosure cases (reachable
   from untrusted input). It is treated as a public hardening finding. Should a
@@ -199,9 +318,19 @@ future release should repeat it.
 
 ```bash
 cd verification/uuid
-make asan     # GCC + ASan/UBSan cross-check; needs only a C++ compiler
+make asan          # GCC + ASan/UBSan cross-check; needs only a C++ compiler
+make confirm       # ESBMC on the named input, plus the safe control
+make esbmc         # ESBMC over the symbolic harness, both input models
+make esbmc-debug   # the same input with asserts live
 ```
 
-Over-length inputs report `heap-buffer-overflow` under `-DNDEBUG` and trip the
+Over-length inputs report `heap-buffer-overflow` under `-DNDEBUG` and trip a
 length assert without it; canonical 36-character UUID strings are `ok` under
 both. `make asan` runs both semantics.
+
+The boundary runs quoted above are the symbolic harness at a different bound:
+
+```bash
+make esbmc MAXLEN=33   # expect SUCCESSFUL
+make esbmc MAXLEN=34   # expect FAILED
+```
