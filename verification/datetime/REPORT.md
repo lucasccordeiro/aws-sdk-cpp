@@ -1,7 +1,8 @@
-# DateTime parsers — findings
+# DateTime — findings
 
 **Target:** `aws/aws-sdk-cpp` @ `c84017197daa00de9cc05b1166e9106e1079f7f3` (v1.11.869)
-**Under analysis:** the three `DateParser` state machines in
+**Under analysis:** the three `DateParser` state machines and the
+timestamp→`time_point` conversion in
 `src/aws-cpp-sdk-core/source/utils/DateTimeCommon.cpp`
 **Tool:** GCC 13 + UndefinedBehaviorSanitizer
 **Provenance:** `vendor/source/utils/DateTimeCommon.cpp` is byte-identical to the
@@ -133,9 +134,79 @@ An earlier pass recorded two claims that this run refutes:
 
 Both errors understated the finding.
 
-## Suggested fix
+---
 
-Bound each accumulator by digit count before multiplying — the ISO parsers
-already know the expected field width, and RFC822 day is 1–2 digits per RFC 5322
-§3.3. Rejecting a field that exceeds its width both removes the UB and makes
-RFC822 agree with the ISO parsers on rejecting malformed input.
+## D-2 — int64 overflow converting an in-spec date to a `time_point`
+
+Investigating whether bounding the accumulators would also fix the `chrono`
+overflow showed that it would not, because that overflow **is not a malformed-input
+bug at all**. It fires on well-formed, in-spec timestamps that every parser
+accepts by design.
+
+`libstdc++`'s `system_clock::duration` is nanoseconds, so its `int64`
+representation saturates ≈292 years after the epoch. `DateTime` converts a parsed
+`tm` into a `time_point` with no range check, so the seconds→nanoseconds
+`duration_cast` (`bits/chrono.h:225`) overflows for any date past the boundary.
+
+Boundary measured exactly — **2262-04-11** is the last clean day:
+
+```
+2262-04-11T00:00:00Z   clean
+2262-04-11T23:47:16Z   clean
+2262-04-12T00:00:00Z   signed integer overflow
+```
+
+### Why this matters more than D-1
+
+No malformed input and no malicious actor is required. `Thu, 31 Dec 9999
+23:59:59 GMT` is the conventional HTTP "never expires" sentinel, and S3 returns
+an `Expires` header whose value an **uploader** chooses via
+`PutObjectRequest::SetExpires` (`PutObjectRequest.h:610`). So in a shared bucket
+the value is cross-user attacker-settable, and it is also a value ordinary
+well-behaved software emits on purpose.
+
+Parsed on the `GetObjectResult.cpp:189` `Expires` path — which is not behind any
+feature flag — the result is:
+
+```
+Thu, 31 Dec 9999 23:59:59 GMT  ->  valid=1, 1816-03-30T05:56:08Z
+```
+
+"Never expires" becomes "expired 210 years ago" — a sign inversion, reported as a
+successful parse. In a `-ftrapv` / `-fno-sanitize-recover` build the same input
+aborts the client instead.
+
+I have **not** shown that any specific caller makes a security decision on that
+1816 value; what happens downstream is application-dependent, and that claim
+should not be made without evidence. The demonstrated facts are the UB, the
+inversion, and the reachability.
+
+### Platform caveat
+
+This is a **Linux/libstdc++ finding**. `libc++` uses a microsecond
+`system_clock`, whose `int64` does not saturate until ≈294247, so these inputs do
+not overflow there. The boundary is a property of the standard library, not of
+the SDK.
+
+### Regression
+
+`harnesses/datetime_range_ubsan.cpp` covers three in-range cases (which a fix
+must keep working) and five past the boundary. Built with
+`-fsanitize=undefined -fno-sanitize-recover=all` it exits 0 on fixed sources and
+aborts on unfixed ones — confirmed aborting against 1.11.869 on 2026-08-13.
+
+---
+
+## Suggested fixes
+
+**D-1** — bound each accumulator by digit count before multiplying. The ISO
+parsers already know the expected field width, and RFC822 day is 1–2 digits per
+RFC 5322 §3.3. Rejecting a field that exceeds its width both removes the UB and
+makes RFC822 agree with the ISO parsers on rejecting malformed input.
+
+**D-2** — range-check before converting to `time_point`. The remedy is a
+compatibility decision that belongs to AWS, not to this report: rejecting
+post-2262 dates changes `WasParseSuccessful()` for input that currently
+"succeeds"; clamping to `time_point::max()` preserves the parse but still yields
+a wrong value; widening the internal representation avoids both but is an ABI
+change. No patch is proposed here for that reason.
