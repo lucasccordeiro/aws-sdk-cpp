@@ -9,9 +9,9 @@
  * isdigit/isspace are spelled as their ASCII ranges so the result does not
  * depend on ESBMC's ctype model.
  *
- * Extraction is necessary, not preference: ESBMC 8.4's C++ frontend has no
- * operational model for std::chrono::system_clock or tm, so the real
- * translation unit does not parse (PARSING ERROR on DateTime.h:66).
+ * Extraction is necessary, not preference: ESBMC 8.4's <chrono> operational
+ * model has no time_point and no clocks, so the real translation unit does not
+ * parse (PARSING ERROR on DateTime.h:66, std::chrono::system_clock).
  *
  *   Reachability : esbmc --overflow-check --unwind 101 d1_accumulator_esbmc.c
  *                  -> VERIFICATION FAILED, arithmetic overflow on mul

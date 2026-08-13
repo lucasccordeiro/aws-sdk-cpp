@@ -20,10 +20,14 @@ Both defects are signed-integer overflow (CWE-190). Neither is memory corruption
 
 ## 1. Find it with ESBMC
 
-ESBMC 8.4 cannot parse the real translation unit — its C++ frontend has no
-operational model for `std::chrono::system_clock` or `tm`, so `DateTime.h:66`
-is a `PARSING ERROR`. The harnesses are therefore line-faithful extractions of
-the two arithmetic sites, each cited back to the source line it models.
+ESBMC 8.4 cannot parse the real translation unit. Its `<chrono>` operational
+model provides `ratio`, `duration` and `duration_cast`, but no `time_point` and
+no clocks, so `DateTime.h:66` fails on `std::chrono::system_clock`. (The
+follow-on `unknown type name 'tm'` is a side effect: `DateTime.h` includes only
+`<chrono>` and relies on it pulling in `<ctime>` transitively, as libstdc++ and
+libc++ both do but the standard does not require.) The harnesses are therefore
+line-faithful extractions of the two arithmetic sites, each cited back to the
+source line it models.
 
 ```sh
 cd harnesses

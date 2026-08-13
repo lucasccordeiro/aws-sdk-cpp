@@ -8,9 +8,10 @@
  * nanoseconds, so the seconds->nanoseconds duration_cast multiplies by 1e9 in
  * bits/chrono.h:225. That multiply is what overflows.
  *
- * Extracted for the same reason as D-1: no chrono operational model in ESBMC
- * 8.4. What is modelled is the multiply and its input range; days_from_civil is
- * the standard Howard Hinnant algorithm, matching timegm on the inputs used.
+ * Extracted for the same reason as D-1: ESBMC 8.4's <chrono> model has duration
+ * and duration_cast but no time_point and no clocks. What is modelled is the
+ * multiply and its input range; days_from_civil is the standard Howard Hinnant
+ * algorithm, matching timegm on the inputs used.
  *
  *   Reachability : esbmc --overflow-check --unwind 2 d2_time_point_esbmc.c
  *                  -> VERIFICATION FAILED, arithmetic overflow on mul
