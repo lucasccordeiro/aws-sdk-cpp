@@ -294,6 +294,66 @@ What the caller set looks like:
   `Aws::Utils::UUID`. The model setters/parsers keep the value as a string; none
   of the model `.cpp` files construct `Aws::Utils::UUID` from a response field.
 
+### The event-stream path, checked against the CRT
+
+The wire-facing bullet above deserves its own note, because on a first read it
+looks like the more dangerous of the two paths. `EventHeader.h` guards the
+16-byte invariant with `assert` alone — gone under `NDEBUG` — and then sizes the
+buffer from a *header-supplied* length:
+
+```cpp
+case EventHeaderType::UUID:
+    assert(header->header_value_len == 16u);
+    m_eventHeaderVariableLengthValue = ByteBuffer(
+        static_cast<uint8_t*>(aws_event_stream_header_value_as_uuid(header).buffer),
+        header->header_value_len);
+```
+
+Read on its own that is a server-reachable out-of-bounds read waiting for a UUID
+header whose length is not 16. It is not one, and the reason is in the CRT
+rather than in the SDK. In `aws-c-event-stream`'s decoder, only the two
+variable-length types take their length from the wire; every fixed-size type,
+UUID included, is assigned a constant:
+
+```c
+    case AWS_EVENT_STREAM_HEADER_STRING:
+    case AWS_EVENT_STREAM_HEADER_BYTE_BUF:
+        decoder->state = s_read_header_value_len;
+        break;
+    ...
+    case AWS_EVENT_STREAM_HEADER_UUID:
+        current_header->header_value_len = 16;
+        decoder->state = s_read_header_value;
+        break;
+```
+
+`header_value_len` is therefore not attacker-controlled on this path. The value
+itself lives in fixed inline storage — `uint8_t static_val[16]` in the header
+union — and the accessor hands back a 16-byte view of it by construction:
+`aws_byte_buf_from_array(header->header_value.static_val, UUID_LEN)`. The other
+way a UUID header can be built, `aws_event_stream_add_uuid_header_by_cursor`,
+rejects any other length outright, since `AWS_RETURN_ERROR_IF` raises when its
+condition is *false* (`if (!(cond)) { return aws_raise_error(err); }`):
+
+```c
+    AWS_RETURN_ERROR_IF(value.len == UUID_LEN, AWS_ERROR_EVENT_STREAM_MESSAGE_INVALID_HEADERS_LEN);
+```
+
+So the SDK's asserts are redundant with an invariant the CRT enforces by
+construction, and the release build is safe for the same reason the debug build
+is. **Defensive-coding observation, not a defect** — recorded because "assert-only
+guard on a length that feeds a `memcpy`" is exactly the shape of U-1, and the
+difference between the two is worth being explicit about.
+
+One curiosity while confirming this: the type-mismatch branch of
+`GetEventHeaderValueAsUuid()` returns `Aws::Utils::UUID(uuid)` from a local
+`char uuid[32] = {0}` — the U-1 string constructor on an empty `Aws::String`,
+whose length is 0 and so would trip U-1's *own* first assert. It never does: the
+branch is preceded by `assert(m_eventHeaderType == EventHeaderType::UUID)`,
+which fires first in a debug build, and in release both sets of asserts are gone
+and the call decodes zero bytes. Safe in both builds, though by construction
+rather than by design.
+
 **Conclusion: no untrusted-input caller of `UUID(const Aws::String&)` exists in
 the SDK.** U-1 is a real memory-safety defect in the function, but it is a
 latent robustness/hardening bug rather than a remotely triggerable one: the only
