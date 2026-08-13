@@ -16,6 +16,11 @@ Both were reported to AWS Security on 2026-07-29 and are now published as
 delegates the codec to `aws-crt-cpp`. AWS also issued
 [Security Bulletin 2026-080-AWS](https://aws.amazon.com/security/security-bulletins/2026-080-aws/).
 
+The exercise was summarised publicly on **2026-08-13**, with AWS's permission, in
+[this post](https://www.linkedin.com/posts/lucas-cordeiro-3156233_formalverification-memorysafety-esbmc-share-7493503595426963457-OZeH/)
+— see "Public write-up" in [REPORT.md](REPORT.md) for what it does and does not
+claim.
+
 ## Layout
 
 ```

@@ -71,6 +71,25 @@ locally.
 harness and every verdict below is a statement about pre-fix code, and updating
 it to 1.11.862 would silently turn the confirmations into non-reproductions.
 
+### Public write-up
+
+AWS's disclosure note asked to see any write-up before publication. A short
+summary of the exercise was cleared with them and
+[posted publicly on **2026-08-13**](https://www.linkedin.com/posts/lucas-cordeiro-3156233_formalverification-memorysafety-esbmc-share-7493503595426963457-OZeH/),
+crediting the AWS Security team's handling, linking Security Bulletin
+2026-080-AWS as its single reference, and telling SDK consumers to upgrade to
+1.11.862 *and* confirm their build picks up the updated `aws-crt-cpp` — the
+caveat both advisories carry for vendored and statically linked builds.
+
+It is a summary, not a substitute for this report, and two of its compressions
+are worth naming so that nothing here is read back through them. It attributes
+the out-of-bounds behaviour to "the decoder's length arithmetic", which is B-1;
+B-2's cause is sign extension of `char` before indexing, an independent defect
+with an independent CVE and a signed-char scoping caveat. And "any input up to a
+given bound" is the alphabet-constrained symbolic mode's `MAXLEN` bound (7 in
+the Makefile), not an unbounded result — the distinction the Summary's verdict
+table keeps. No reproducer, harness or counterexample input appears in the post.
+
 ---
 
 ## Summary
