@@ -5,14 +5,30 @@
 #
 #   ./reproduce.sh            all four legs
 #   ./reproduce.sh esbmc      one leg: esbmc | sanitizer | tests | reachability
+#
+# D-2's runtime legs need a nanosecond system_clock (libstdc++); on libc++ they
+# are skipped, since its microsecond clock puts these dates inside the window.
+# Set CXX to pick a compiler, or CLOCK_DEN to see another platform's rendering.
 
 set -u
 
 UPSTREAM_COMMIT=c84017197daa00de9cc05b1166e9106e1079f7f3
 RAW=https://raw.githubusercontent.com/aws/aws-sdk-cpp/$UPSTREAM_COMMIT
+CXX=${CXX:-g++}
 CXXFLAGS="-std=c++11 -g -O0 -Istubs -Ivendor -Ivendor/include"
 UBSAN="-fsanitize=undefined -fno-sanitize-recover=all"
 SRC="vendor/source/utils/DateTimeCommon.cpp stubs/aws_platform_time_stub.cpp"
+CLOCK_DEN=${CLOCK_DEN:-}
+
+clock_den() { # ticks per second in system_clock::period
+  if [[ -z "$CLOCK_DEN" ]]; then
+    mkdir -p results
+    printf '#include <chrono>\n#include <cstdio>\nint main(){std::printf("%%lld\\n",(long long)std::chrono::system_clock::period::den);}\n' > results/clock_probe.cpp
+    $CXX -std=c++11 results/clock_probe.cpp -o results/clock_probe 2>/dev/null &&
+      CLOCK_DEN=$(./results/clock_probe) || CLOCK_DEN=0
+  fi
+  echo "$CLOCK_DEN"
+}
 
 pass=0 fail=0
 check() { # check <name> <expected-substring> <actual>
@@ -37,10 +53,16 @@ leg_esbmc() {
 leg_sanitizer() {
   echo "[2/4] UBSan -- confirm on the real 1.11.869 source"
   mkdir -p results
-  g++ $CXXFLAGS $UBSAN harnesses/datetime_parse_asan.cpp $SRC -o results/dt_trap || return
-  g++ $CXXFLAGS $UBSAN harnesses/datetime_range_ubsan.cpp $SRC -o results/dt_range || return
+  $CXX $CXXFLAGS $UBSAN harnesses/datetime_parse_asan.cpp $SRC -o results/dt_trap || return
+  $CXX $CXXFLAGS $UBSAN harnesses/datetime_range_ubsan.cpp $SRC -o results/dt_range || return
   check "D-1 traps in the day accumulator" "DateTimeCommon.cpp:482" \
     "$(./results/dt_trap rfc822 'Wed, 99999999999999999999 Oct 2002 08:00:00 GMT' 2>&1 | head -1)"
+
+  local den; den=$(clock_den)
+  if [[ "$den" != 1000000000 ]]; then
+    echo "  SKIP  D-2 needs a nanosecond system_clock; this one is 1/$den s, so these dates are in range"
+    return
+  fi
   check "D-2 traps converting to time_point" "chrono.h:225" \
     "$(./results/dt_range 2>&1 | tail -1)"
 }
@@ -48,12 +70,23 @@ leg_sanitizer() {
 leg_tests() {
   echo "[3/4] Test cases -- ordinary build, no sanitizer, wrong values visible"
   mkdir -p results
-  g++ $CXXFLAGS harnesses/datetime_cases.cpp $SRC -o results/dt_cases || return
-  local out; out=$(./results/dt_cases)
-  check "never-expires reads as 1816"   "1816-03-30T05:56:08Z" "$(grep -A2 'Thu, 31 Dec 9999.*rfc822' <<<"$out" | tail -1)"
-  check "a 1600 timestamp reads as 2184" "2184-07-20"          "$(grep -A2 '1600-01-01.*iso8601' <<<"$out" | tail -1)"
-  check "a 20-digit day is accepted"     "valid=1"             "$(grep -A2 '99999999999999999999' <<<"$out" | tail -1)"
-  check "the in-range cases still pass"  "6 of 10 cases failed" "$(tail -1 <<<"$out")"
+  $CXX $CXXFLAGS harnesses/datetime_cases.cpp $SRC -o results/dt_cases || return
+  local out den; out=$(./results/dt_cases)
+  den=$(grep -o 'clock_den=[0-9]*' <<<"$out" | cut -d= -f2)  # what the binary saw
+  row() { grep -m1 "RESULT.*$1" <<<"$out"; }  # one line per case, so no misreads
+
+  check "an ordinary timestamp round-trips" "RESULT PASS" "$(row '2002-10-02')"
+  check "a 20-digit day is accepted"        "valid=1"     "$(row '99999999999999999999')"
+  check "a nine-digit day inverts"          "RESULT FAIL" "$(row '999999999 Oct')"
+
+  if [[ "$den" != 1000000000 ]]; then
+    echo "  SKIP  the four D-2 cases: a 1/$den s system_clock represents those dates"
+    check "the skip is reported"           "skipped=4"            "$(grep SUMMARY <<<"$out")"
+    return
+  fi
+  check "never-expires reads as 1816"      "1816-03-30T05:56:08Z" "$(row 'Thu, 31 Dec 9999')"
+  check "a 1600 timestamp reads as 2184"   "2184-07-20"           "$(row '1600-01-01')"
+  check "the in-range cases still pass"    "failed=6 checked=10"  "$(grep SUMMARY <<<"$out")"
 }
 
 leg_reachability() {

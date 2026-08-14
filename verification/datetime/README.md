@@ -30,17 +30,26 @@ response header. A validated patch is in `fix/`.
 ## Run it
 
 ```sh
-./reproduce.sh          # 15 checks, ~1 min
+./reproduce.sh          # 17 checks, ~1 min
 ```
 
-Needs ESBMC 8.4.0, g++ 13 with libstdc++, and curl. Each leg also runs alone:
-`./reproduce.sh esbmc | sanitizer | tests | reachability`.
+Needs ESBMC 8.4.0, a C++11 compiler and curl. Each leg also runs alone:
+`./reproduce.sh esbmc | sanitizer | tests | reachability`. Set `CXX` to choose
+the compiler.
+
+**Platform.** D-2's *runtime* legs need a nanosecond `system_clock`, i.e.
+libstdc++. On libc++ — the default on macOS — that clock counts microseconds and
+does not saturate until ≈294247, so these dates are in range and the D-2 checks
+report SKIP rather than a spurious failure. D-1 traps everywhere: it overflows an
+`int`. The ESBMC leg proves D-2 on any host, because it models the
+seconds-to-nanoseconds conversion explicitly rather than inheriting the host's
+clock.
 
 | Leg | What it establishes |
 |---|---|
 | **ESBMC** | Both overflows are reachable, and the safe boundary is exact |
 | **UBSan** | Both trap on the pristine 1.11.869 file — `DateTimeCommon.cpp:482` and `bits/chrono.h:225` |
-| **Tests** | Ordinary `-O0` build, no sanitizer: 6 of 10 contract cases fail, printing the wrong dates |
+| **Tests** | Ordinary `-O0` build, no sanitizer: on libstdc++ 6 of 10 contract cases fail, printing the wrong dates |
 | **Reachability** | The response-header paths that carry attacker-influenced input, read off the pinned commit |
 
 ### ESBMC — the boundaries are proved, not measured
