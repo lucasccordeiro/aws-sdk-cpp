@@ -29,6 +29,11 @@ libc++ both do but the standard does not require.) The harnesses are therefore
 line-faithful extractions of the two arithmetic sites, each cited back to the
 source line it models.
 
+Both blockers are fixed on ESBMC master by
+[#6985](https://github.com/esbmc/esbmc/pull/6985) — `time_point`, the three
+clocks and the `<ctime>` pull-in — but not in any release, so the runs below
+still use 8.4.0 and the extractions still stand.
+
 ```sh
 cd harnesses
 esbmc --overflow-check --unwind 101                     d1_accumulator_esbmc.c
