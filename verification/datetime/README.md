@@ -43,7 +43,9 @@ does not saturate until ≈294247, so these dates are in range and the D-2 check
 report SKIP rather than a spurious failure. D-1 traps everywhere: it overflows an
 `int`. The ESBMC leg proves D-2 on any host, because it models the
 seconds-to-nanoseconds conversion explicitly rather than inheriting the host's
-clock.
+clock. Expect **17 passed, 0 failed** on libstdc++ and **14 passed, 0 failed**
+with two skips on libc++; either way the script exits 0, and a *failure* is what
+would need explaining.
 
 | Leg | What it establishes |
 |---|---|
