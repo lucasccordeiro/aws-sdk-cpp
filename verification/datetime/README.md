@@ -1,10 +1,18 @@
 # Integer-overflow UB in `Aws::Utils::DateTime` — D-1 and D-2
 
 Two signed-integer-overflow defects (CWE-190) in
-`src/aws-cpp-sdk-core/source/utils/DateTimeCommon.cpp`, at v1.11.869
-(`c84017197daa00de9cc05b1166e9106e1079f7f3`). `main` is byte-identical for that
-file, so HEAD is affected. `vendor/` holds it unmodified; nothing here patches
-the SDK before testing it.
+`src/aws-cpp-sdk-core/source/utils/DateTimeCommon.cpp`, found at v1.11.869
+(`c84017197daa00de9cc05b1166e9106e1079f7f3`) and present in every release up to
+1.11.876. `vendor/` holds that file unmodified; nothing here patches the SDK
+before testing it.
+
+**Fixed upstream in [1.11.877](https://github.com/aws/aws-sdk-cpp/releases/tag/1.11.877).**
+Reported to AWS Security on 2026-08-18 and closed by
+[PR #3896](https://github.com/aws/aws-sdk-cpp/pull/3896), merged 2026-08-24. AWS
+took the D-1 patch in `fix/` verbatim and added its own range check for D-2. No
+CVE was assigned — AWS classed the change as defense in depth — and the merge
+commit credits Lucas Carvalho Cordeiro and Rafael Sa Menezes, University of
+Manchester. `./reproduce.sh fix` re-runs both findings against the shipped file.
 
 **D-2 — the one we would prioritise.** `DateTime` converts a parsed timestamp to
 `std::chrono::system_clock::time_point` with no range check. On libstdc++ that
@@ -30,12 +38,12 @@ response header. A validated patch is in `fix/`.
 ## Run it
 
 ```sh
-./reproduce.sh          # 17 checks, ~1 min
+./reproduce.sh          # 22 checks, ~1 min
 ```
 
 Needs ESBMC 8.4.0, a C++11 compiler and curl. Each leg also runs alone:
-`./reproduce.sh esbmc | sanitizer | tests | reachability`. Set `CXX` to choose
-the compiler.
+`./reproduce.sh esbmc | sanitizer | tests | reachability | fix`. Set `CXX` to
+choose the compiler.
 
 **Platform.** D-2's *runtime* legs need a nanosecond `system_clock`, i.e.
 libstdc++. On libc++ — the default on macOS — that clock counts microseconds and
@@ -43,9 +51,9 @@ does not saturate until ≈294247, so these dates are in range and the D-2 check
 report SKIP rather than a spurious failure. D-1 traps everywhere: it overflows an
 `int`. The ESBMC leg proves D-2 on any host, because it models the
 seconds-to-nanoseconds conversion explicitly rather than inheriting the host's
-clock. Expect **17 passed, 0 failed** on libstdc++ and **14 passed, 0 failed**
-with two skips on libc++; either way the script exits 0, and a *failure* is what
-would need explaining.
+clock. Expect **22 passed, 0 failed** on libstdc++ and **18 passed, 0 failed**
+with three skips on libc++; either way the script exits 0, and a *failure* is
+what would need explaining.
 
 | Leg | What it establishes |
 |---|---|
@@ -53,6 +61,7 @@ would need explaining.
 | **UBSan** | Both trap on the pristine 1.11.869 file — `DateTimeCommon.cpp:482` and `bits/chrono.h:225` |
 | **Tests** | Ordinary `-O0` build, no sanitizer: on libstdc++ 6 of 10 contract cases fail, printing the wrong dates |
 | **Reachability** | The response-header paths that carry attacker-influenced input, read off the pinned commit |
+| **Fix** | The same reproducers against 1.11.877: both defects gone, and the parser hunks are ours unchanged |
 
 ### ESBMC — the boundaries are proved, not measured
 
@@ -84,8 +93,30 @@ day-field test cases green and leaves the four D-2 cases failing. Validated on
 19-case corpus of valid input gives byte-identical `valid`/`millis` against
 patched and pristine sources.
 
-No patch for D-2: the remedy is a compatibility decision — reject, clamp, or
-widen the representation (an ABI change) — that belongs to AWS.
+We proposed no patch for D-2, because the remedy is a compatibility decision —
+reject, clamp, or widen the representation (an ABI change) — that belonged to
+AWS.
+
+### What 1.11.877 shipped
+
+The D-1 patch went in unchanged: the parser side of `DateTimeCommon.cpp` at
+1.11.877 is byte-identical to the pristine file with `fix/` applied, which
+`./reproduce.sh fix` checks by diffing the two. AWS chose **reject** for D-2:
+
+```cpp
+if (IsSecondsSinceEpochRepresentable(tt))
+    m_time = std::chrono::system_clock::from_time_t(tt);
+else
+    m_valid = false;   // and log a warning
+```
+
+The window is read off `system_clock::time_point::min()/max()` rather than
+hard-coded, so each platform gets its own — on libstdc++ exactly the
+`|seconds| ≤ 9223372036` bound the ESBMC leg proved, and ~1000× wider on libc++.
+Rebuilding the harnesses against that file under `-fno-sanitize-recover=all`:
+all 10 contract cases hold where 6 failed before, the never-expires sentinel
+comes back `valid=0` instead of 1816, and neither overflow trips. PR #3896 also
+carries 12 GTest cases of its own covering the same boundaries.
 
 ## Not claimed
 

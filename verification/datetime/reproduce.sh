@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Reproduces D-1 and D-2 end to end: ESBMC proofs, sanitizer witnesses,
-# executable test cases, reachability. Run from this directory. Exits 0 only if
-# every leg matches.
+# executable test cases, reachability, and the upstream fix. Run from this
+# directory. Exits 0 only if every leg matches.
 #
-#   ./reproduce.sh            all four legs
-#   ./reproduce.sh esbmc      one leg: esbmc | sanitizer | tests | reachability
+#   ./reproduce.sh            all five legs
+#   ./reproduce.sh esbmc      one leg: esbmc | sanitizer | tests | reachability | fix
 #
 # D-2's runtime legs need a nanosecond system_clock (libstdc++); on libc++ they
 # are skipped, since its microsecond clock puts these dates inside the window.
@@ -14,6 +14,8 @@ set -u
 
 UPSTREAM_COMMIT=c84017197daa00de9cc05b1166e9106e1079f7f3
 RAW=https://raw.githubusercontent.com/aws/aws-sdk-cpp/$UPSTREAM_COMMIT
+FIXED_VERSION=1.11.877  # first tag carrying PR #3896
+FIXED_RAW=https://raw.githubusercontent.com/aws/aws-sdk-cpp/$FIXED_VERSION
 CXX=${CXX:-g++}
 CXXFLAGS="-std=c++11 -g -O0 -Istubs -Ivendor -Ivendor/include"
 UBSAN="-fsanitize=undefined -fno-sanitize-recover=all"
@@ -47,7 +49,7 @@ verdict() {
 }
 
 leg_esbmc() {
-  echo "[1/4] ESBMC -- find the defects symbolically"
+  echo "[1/5] ESBMC -- find the defects symbolically"
   command -v esbmc >/dev/null || { echo "  SKIP  esbmc not on PATH"; return; }
   local h=harnesses
   check "D-1 overflow is reachable"     "VERIFICATION FAILED" \
@@ -61,7 +63,7 @@ leg_esbmc() {
 }
 
 leg_sanitizer() {
-  echo "[2/4] UBSan -- confirm on the real 1.11.869 source"
+  echo "[2/5] UBSan -- confirm on the real 1.11.869 source"
   mkdir -p results
   $CXX $CXXFLAGS $UBSAN harnesses/datetime_parse_asan.cpp $SRC -o results/dt_trap || return
   $CXX $CXXFLAGS $UBSAN harnesses/datetime_range_ubsan.cpp $SRC -o results/dt_range || return
@@ -78,7 +80,7 @@ leg_sanitizer() {
 }
 
 leg_tests() {
-  echo "[3/4] Test cases -- ordinary build, no sanitizer, wrong values visible"
+  echo "[3/5] Test cases -- ordinary build, no sanitizer, wrong values visible"
   mkdir -p results
   $CXX $CXXFLAGS harnesses/datetime_cases.cpp $SRC -o results/dt_cases || return
   local out den; out=$(./results/dt_cases)
@@ -100,7 +102,7 @@ leg_tests() {
 }
 
 leg_reachability() {
-  echo "[4/4] Reachability -- untrusted input reaches both, at $UPSTREAM_COMMIT"
+  echo "[4/5] Reachability -- untrusted input reaches both, at $UPSTREAM_COMMIT"
   local tmp; tmp=$(mktemp -d)
   curl -fsS "$RAW/src/aws-cpp-sdk-core/source/client/AWSClient.cpp" -o "$tmp/AWSClient.cpp" 2>/dev/null \
     || { echo "  SKIP  no network"; return; }
@@ -120,13 +122,51 @@ leg_reachability() {
   rm -rf "$tmp"
 }
 
+leg_fix() {
+  echo "[5/5] Fix -- both defects closed upstream in $FIXED_VERSION (PR #3896)"
+  mkdir -p results
+  local fixed=results/DateTimeCommon.$FIXED_VERSION.cpp
+  curl -fsS "$FIXED_RAW/src/aws-cpp-sdk-core/source/utils/DateTimeCommon.cpp" -o "$fixed" 2>/dev/null \
+    || { echo "  SKIP  no network"; return; }
+
+  # The field widths we submitted went in unchanged: applying our patch to the
+  # pristine file leaves no parser-side difference against what AWS shipped.
+  local ours=results/DateTimeCommon.ourfix.cpp
+  cp vendor/source/utils/DateTimeCommon.cpp "$ours"
+  patch -s -p1 --no-backup-if-mismatch --input=fix/d1-bound-field-widths.patch "$ours"
+  check "our field widths shipped verbatim" "0 parser lines differ" \
+    "$(diff "$ours" "$fixed" | grep -c stateStartIndex) parser lines differ"
+  check "D-2 is fixed by a range check" "IsSecondsSinceEpochRepresentable" \
+    "$(grep -m1 IsSecondsSinceEpochRepresentable "$fixed")"
+
+  # UBSan on both: a surviving overflow aborts, so any output is half the claim.
+  $CXX $CXXFLAGS $UBSAN harnesses/datetime_parse_asan.cpp "$fixed" \
+    stubs/aws_platform_time_stub.cpp -o results/dt_trap_fixed || return
+  $CXX $CXXFLAGS $UBSAN harnesses/datetime_cases.cpp "$fixed" \
+    stubs/aws_platform_time_stub.cpp -o results/dt_cases_fixed || return
+
+  check "a 20-digit day is rejected, not wrapped" "valid=0" \
+    "$(./results/dt_trap_fixed rfc822 'Wed, 99999999999999999999 Oct 2002 08:00:00 GMT' 2>&1 | tail -1)"
+
+  local out den; out=$(./results/dt_cases_fixed); den=$(clock_den)
+  if [[ "$den" == 1000000000 ]]; then
+    check "never-expires is rejected, not read as 1816" "valid=0" \
+      "$(grep -m1 'Thu, 31 Dec 9999' <<<"$out")"
+  else
+    echo "  SKIP  never-expires: a 1/$den s system_clock represents that date"
+  fi
+  check "every contract case holds on $FIXED_VERSION" "failed=0" \
+    "$(grep SUMMARY <<<"$out")"
+}
+
 case "${1:-all}" in
   esbmc) leg_esbmc ;;
   sanitizer) leg_sanitizer ;;
   tests) leg_tests ;;
   reachability) leg_reachability ;;
-  all) leg_esbmc; leg_sanitizer; leg_tests; leg_reachability ;;
-  *) echo "usage: $0 [all|esbmc|sanitizer|tests|reachability]"; exit 2 ;;
+  fix) leg_fix ;;
+  all) leg_esbmc; leg_sanitizer; leg_tests; leg_reachability; leg_fix ;;
+  *) echo "usage: $0 [all|esbmc|sanitizer|tests|reachability|fix]"; exit 2 ;;
 esac
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

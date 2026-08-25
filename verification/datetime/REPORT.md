@@ -8,7 +8,35 @@ timestamp→`time_point` conversion in
 **Provenance:** `vendor/source/utils/DateTimeCommon.cpp` is byte-identical to the
 1.11.869 tag (`diff` against `raw.githubusercontent.com`, re-checked 2026-08-13).
 
-**Status: HELD — not reported upstream, not published.**
+---
+
+## Disclosure and upstream status
+
+Both defects were reported to AWS Security on **2026-08-18** under coordinated
+disclosure. AWS fixed them in
+[PR #3896](https://github.com/aws/aws-sdk-cpp/pull/3896) — "Validate DateTime
+range and bound parser field widths (defense in depth)" — merged **2026-08-24**
+as `70836bcd62c7fdc907b28e28f5f4e825806e78f2` and first tagged in
+**[1.11.877](https://github.com/aws/aws-sdk-cpp/releases/tag/1.11.877)**.
+Everything up to and including 1.11.876 is affected: `vendor/` is pinned at
+1.11.869 and that file is byte-identical at 1.11.876.
+
+| Here | How it was fixed |
+|---|---|
+| **D-1** unbounded digit accumulators | `fix/d1-bound-field-widths.patch` taken verbatim — 12 sites bounded by field width |
+| **D-2** `time_point` conversion overflow | `IsSecondsSinceEpochRepresentable`, a range check before `from_time_t`; out-of-range input now fails the parse |
+
+Unlike B-1/B-2 this shipped as a **defense-in-depth** change: no GitHub
+advisory, no CVE, no security bulletin. That matches what was reported —
+neither defect is memory corruption, and no downstream security decision was
+demonstrated (see *What this is not*). The merge commit credits Lucas Carvalho
+Cordeiro and Rafael Sa Menezes of the University of Manchester, "who reported
+these issues and supplied the field-width patch, via the coordinated
+vulnerability disclosure process."
+
+`./reproduce.sh fix` re-runs the reproducers against the 1.11.877 file: the
+parser side is our patch unchanged, and all 10 contract cases hold — 6 of them
+failed on 1.11.869 — with no UB under `-fno-sanitize-recover=all`.
 
 ---
 
@@ -221,7 +249,8 @@ the SDK.
 `harnesses/datetime_range_ubsan.cpp` covers three in-range cases (which a fix
 must keep working) and five past the boundary. Built with
 `-fsanitize=undefined -fno-sanitize-recover=all` it exits 0 on fixed sources and
-aborts on unfixed ones — confirmed aborting against 1.11.869 on 2026-08-13.
+aborts on unfixed ones — confirmed aborting against 1.11.869 on 2026-08-13, and
+exiting 0 against the fixed 1.11.877 file on 2026-08-25.
 
 ---
 
@@ -254,3 +283,31 @@ post-2262 dates changes `WasParseSuccessful()` for input that currently
 "succeeds"; clamping to `time_point::max()` preserves the parse but still yields
 a wrong value; widening the internal representation avoids both but is an ABI
 change. No patch is proposed here for that reason.
+
+## What AWS shipped
+
+**D-1: the patch above, unchanged.** Confirmed by construction — applying
+`fix/d1-bound-field-widths.patch` to the pristine file and diffing against
+1.11.877 leaves no difference anywhere in the three parsers. The only additions
+are on the D-2 side.
+
+**D-2: reject**, the first of the three options weighed above.
+`IsSecondsSinceEpochRepresentable` derives the window from
+`system_clock::time_point::min()/max()`, and `ConvertTimestampStringToTimePoint`
+sets `m_valid = false` and logs a warning rather than converting when the parsed
+`time_t` falls outside it. Deriving the bound instead of hard-coding it keeps
+libc++ builds on their own wider window, so nothing that already parsed there
+stops parsing.
+
+The compatibility cost is the one anticipated: `WasParseSuccessful()` now
+returns false for input that used to "succeed", including the HTTP never-expires
+sentinel on any nanosecond-clock build. A caller that treated a parsed `Expires`
+as authoritative now sees an invalid `DateTime` rather than a 1816 timestamp —
+which is the point, but it is a behaviour change on valid wire input.
+
+PR #3896 also adds 12 GTest cases to
+`tests/aws-cpp-sdk-core-tests/utils/DateTimeTest.cpp`: both boundaries and one
+day past each, the sentinel through RFC822, ISO-8601 and AutoDetect, and the
+9- and 20-digit day inputs — the same shapes as `harnesses/datetime_cases.cpp`,
+guarded the same way on `system_clock::period` so they skip rather than fail
+where the window is wider.
