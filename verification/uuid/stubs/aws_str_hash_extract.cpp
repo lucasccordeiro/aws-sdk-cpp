@@ -16,6 +16,8 @@
  * harness, so their externs only need to resolve, not behave.
  */
 
+#include "../../stubs/esbmc_compat.h"
+
 #include <aws/core/utils/HashingUtils.h>
 #include <aws/core/utils/StringUtils.h>
 #include <aws/core/utils/crypto/Factories.h>
