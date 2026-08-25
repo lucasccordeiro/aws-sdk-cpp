@@ -43,7 +43,9 @@ response header. A validated patch is in `fix/`.
 
 Needs ESBMC 8.4.0, a C++11 compiler and curl. Each leg also runs alone:
 `./reproduce.sh esbmc | sanitizer | tests | reachability | fix`. Set `CXX` to
-choose the compiler.
+choose the compiler. A sixth leg, `module`, re-runs the two ESBMC obligations
+against the whole translation unit instead of the extracted models; it is
+minutes per obligation rather than seconds, so `all` leaves it out.
 
 **Platform.** D-2's *runtime* legs need a nanosecond `system_clock`, i.e.
 libstdc++. On libc++ — the default on macOS — that clock counts microseconds and
@@ -62,6 +64,7 @@ what would need explaining.
 | **Tests** | Ordinary `-O0` build, no sanitizer: on libstdc++ 6 of 10 contract cases fail, printing the wrong dates |
 | **Reachability** | The response-header paths that carry attacker-influenced input, read off the pinned commit |
 | **Fix** | The same reproducers against 1.11.877: both defects gone, and the parser hunks are ours unchanged |
+| **Module** (opt-in) | The two ESBMC obligations against the real `DateTimeCommon.cpp`, both versions |
 
 ### ESBMC — the boundaries are proved, not measured
 
@@ -74,6 +77,55 @@ what would need explaining.
 
 Each pair is the finding: FAILED shows the overflow is reachable, SUCCESSFUL
 pins the boundary. Both SUCCESSFUL runs agree under Bitwuzla and Z3.
+
+### The same properties, on the module itself
+
+The obligations above run against line-faithful *extractions*
+(`d1_accumulator_esbmc.c`, `d2_time_point_esbmc.c`) — which is what ESBMC could
+manage when they were written, because the real translation unit did not parse.
+It does now: esbmc/esbmc#7141 modelled `timegm`, and #7138-7140 removed the
+`basic_string` false positives. So `./reproduce.sh module` puts the same two
+properties to `vendor/source/utils/DateTimeCommon.cpp` itself, with 1.11.877
+beside it.
+
+| Obligation | Source | Verdict |
+|---|---|---|
+| D-1, 20-digit RFC822 day | 1.11.869 | **FAILED** — `!overflow("*", …tm_mday, 10)` at `DateTimeCommon.cpp:482` |
+| D-1, same input | 1.11.877 | **SUCCESSFUL** — 362 properties, unwinding assertions passed |
+| D-2, ordinary ISO 8601 date | 1.11.869 | **FAILED** — `arithmetic overflow on mul` in `<chrono>` |
+| D-2, same input | 1.11.877 | **SUCCESSFUL** — 232 properties, unwinding assertions passed |
+
+Two things make the SUCCESSFUL rows worth more than the ten contract cases. The
+unwind is **complete** — the unwinding assertions pass rather than being
+suppressed, so no truncated loop is being read as a proof — and ESBMC models
+`timegm` as returning an unconstrained `time_t`, so the range check is shown to
+hold for *every* seconds value a parse could yield rather than for the dates
+someone thought to try. Only the SUCCESSFUL direction needs the full unwind; a
+counterexample is sound at any depth, which is why the two directions run at
+different bounds.
+
+**Cost.** The D-2 pair is a couple of GB and about 30 seconds a side. The D-1
+pair is not: `strlen` unwinds once per character, so its 46-character input
+needs ~47 iterations before the parse loop is even entered, and the run peaks
+near 60 GB. There is no cheaper bound — dropping to `--unwind 20` does not find
+the overflow sooner, it just truncates `strlen` and reaches nothing. The leg
+therefore skips the D-1 pair below 70 GB free rather than invite the OOM killer,
+which on a loaded host will otherwise take the script with it and leave a
+half-finished log that reads like a clean run.
+
+`--include-file cctype` is needed throughout: ESBMC's `<iostream>` and
+`<cstring>` do not pull in `<cctype>` transitively, and the standard does not
+require them to. A forced include keeps `vendor/` pristine where an edit would
+not.
+
+Solver coverage is uneven, and the table should be read with that in mind. Both
+D-2 rows agree under Bitwuzla and Z3. The D-1 SUCCESSFUL row is **Bitwuzla
+only** — Z3 was still unwinding after 40 minutes on a host at load 38 and never
+reached a verdict, so that row is single-solver until it is re-run somewhere
+quiet. Both D-1 rows were measured with the input written into the harness
+directly, before the `-D` wiring the leg now uses existed; the wiring produces
+the same literal in the GOTO program, but the rows have not been re-measured
+through it on a host with the memory to do so.
 
 ### Reachability, read off the pinned commit
 

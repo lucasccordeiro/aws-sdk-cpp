@@ -311,3 +311,59 @@ day past each, the sentinel through RFC822, ISO-8601 and AutoDetect, and the
 9- and 20-digit day inputs — the same shapes as `harnesses/datetime_cases.cpp`,
 guarded the same way on `system_clock::period` so they skip rather than fail
 where the window is wider.
+
+## Verified against the module, not an extraction (2026-08-25)
+
+The ESBMC obligations in `harnesses/d1_accumulator_esbmc.c` and
+`d2_time_point_esbmc.c` are line-faithful *copies* of the two arithmetic sites.
+That was not a choice: when they were written the real translation unit did not
+parse, and an extraction was the only way to get a symbolic verdict at all.
+
+Three of the four gaps behind that have since closed upstream — esbmc/esbmc#7141
+modelled `timegm`, and #7138-7140 removed the `basic_string::size()`,
+`resize()` and `max_size()` false positives. The fourth, `<cctype>` not being
+reachable transitively through `<iostream>`/`<cstring>`, is a fidelity gap
+rather than a defect (the standard does not require the transitivity), and
+`--include-file cctype` covers it without touching `vendor/`.
+
+So `Aws::Utils::DateTime` can now be put to ESBMC as the module it actually is.
+`harnesses/datetime_pristine_esbmc.cpp` compiles the whole pristine TU and
+asserts nothing of its own; every property comes from `--overflow-check`, so no
+verdict can be an artefact of how the harness was phrased. Run against both
+versions:
+
+| Input | 1.11.869 | 1.11.877 |
+|---|---|---|
+| `Wed, 99999999999999999999 Oct 2002 08:00:00 GMT` (RFC822) | **FAILED** — `!overflow("*", …tm_mday, 10)` at `DateTimeCommon.cpp:482` | **SUCCESSFUL** — 362 properties |
+| `2002-10-02T08:00:00Z` (ISO 8601) | **FAILED** — `arithmetic overflow on mul` in `<chrono>` | **SUCCESSFUL** — 232 properties |
+
+The FAILED rows name the same line UBSan named, which is the point of running
+them this way: the extraction could only ever report its own copy of the site.
+
+The SUCCESSFUL rows are the stronger half, for two reasons that are easy to lose:
+
+1. **The unwind is complete.** The unwinding assertions are left on and they
+   *pass*, so no loop was truncated into a proof. This matters more than usual
+   here: `--no-unwinding-assertions` on this codebase yields SUCCESSFUL on
+   truncated loops, which is exactly the false verdict the whole exercise is
+   supposed to avoid.
+2. **`timegm` is unconstrained.** ESBMC models it as returning an arbitrary
+   `time_t`, so `IsSecondsSinceEpochRepresentable` is shown to hold for *every*
+   seconds value a parse could produce — not for the ten dates
+   `datetime_cases.cpp` tries. That is a proof about the guard rather than a
+   sample of it.
+
+**Caveats, so the table is not read as more than it is.** Both D-2 rows agree
+under Bitwuzla and Z3; the D-1 SUCCESSFUL row is Bitwuzla only, because Z3 was
+still unwinding after 40 minutes on a host at load 38. The D-1 pair peaks near
+60 GB — one run was OOM-killed mid-proof during this work — so `reproduce.sh
+module` skips it below 70 GB free rather than report a killed run as a clean
+one. And the D-1 rows were measured with the input inlined in the harness,
+before the `-D` parameterisation the leg now uses; that wiring puts the same
+literal in the GOTO program but the rows have not been re-measured through it.
+
+This does **not** retire the extracted harnesses. They remain the cheap,
+portable version of the same two obligations, they run in seconds rather than
+minutes, and `d2_time_point_esbmc.c` is what ties D-2's boundary to a concrete
+date (`seconds=203605488000`, 8422-01-01) — which the module-level run, with its
+unconstrained `timegm`, deliberately does not.
