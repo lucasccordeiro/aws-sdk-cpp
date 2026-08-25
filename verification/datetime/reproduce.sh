@@ -36,18 +36,28 @@ check() { # check <name> <expected-substring> <actual>
   else printf '  FAIL  %s\n        wanted: %s\n        got: %s\n' "$1" "$2" "$3"; fail=$((fail + 1)); fi
 }
 
+# Match the verdict line itself, not the last lines of the run: the version
+# banner arrives on the other stream, and twice under load the verdict landed
+# outside a two-line tail and read as a failed obligation. A run that produces
+# no verdict at all now says so instead of failing as a wrong one.
+verdict() {
+  local out; out=$("$@" 2>&1)
+  grep -m1 -E '^VERIFICATION (SUCCESSFUL|FAILED)' <<<"$out" ||
+    printf 'no verdict; last lines: %s' "$(tail -3 <<<"$out" | tr '\n' ' ')"
+}
+
 leg_esbmc() {
   echo "[1/4] ESBMC -- find the defects symbolically"
   command -v esbmc >/dev/null || { echo "  SKIP  esbmc not on PATH"; return; }
   local h=harnesses
   check "D-1 overflow is reachable"     "VERIFICATION FAILED" \
-    "$(esbmc --overflow-check --unwind 101 $h/d1_accumulator_esbmc.c 2>&1 | tail -2)"
+    "$(verdict esbmc --overflow-check --unwind 101 $h/d1_accumulator_esbmc.c)"
   check "D-1 safe at <=9 digits"        "VERIFICATION SUCCESSFUL" \
-    "$(esbmc --overflow-check --unwind 101 -DBOUND_DIGITS=9 $h/d1_accumulator_esbmc.c 2>&1 | tail -2)"
+    "$(verdict esbmc --overflow-check --unwind 101 -DBOUND_DIGITS=9 $h/d1_accumulator_esbmc.c)"
   check "D-2 overflow is reachable"     "VERIFICATION FAILED" \
-    "$(esbmc --overflow-check --unwind 2 $h/d2_time_point_esbmc.c 2>&1 | tail -2)"
+    "$(verdict esbmc --overflow-check --unwind 2 $h/d2_time_point_esbmc.c)"
   check "D-2 safe inside the window"    "VERIFICATION SUCCESSFUL" \
-    "$(esbmc --overflow-check --unwind 2 -DASSUME_IN_WINDOW $h/d2_time_point_esbmc.c 2>&1 | tail -2)"
+    "$(verdict esbmc --overflow-check --unwind 2 -DASSUME_IN_WINDOW $h/d2_time_point_esbmc.c)"
 }
 
 leg_sanitizer() {
