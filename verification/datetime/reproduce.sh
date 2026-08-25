@@ -194,7 +194,7 @@ leg_module() {
         "$(tail -2 <<<"$1" | tr '\n' ' ')"
   }
 
-  # D-2 first: an ordinary 20-character date, a couple of GB, ~30 s a side.
+  # D-2 first: an ordinary 20-character date, ~0.6 GB and 20-30 s a side.
   local out
   out=$(esbmc "${common[@]}" --unwind 25 $h $pristine $stub 2>&1)
   check "D-2 overflows the seconds-to-nanoseconds multiply" "arithmetic overflow on mul" \
@@ -202,13 +202,13 @@ leg_module() {
   check "the range check holds on $FIXED_VERSION" "VERIFICATION SUCCESSFUL" \
     "$(verdict esbmc "${common[@]}" --unwind 25 $h "$fixed" $stub)"
 
-  # D-1 costs far more, and the floor is not negotiable: strlen alone unwinds
-  # once per character, so a 46-character input needs ~47 before the parse loop
-  # is even reached. Measured near 60 GB peak, which is an OOM kill on a busy
-  # host -- and a killed run must not be reported as a proof.
+  # D-1 costs more, and the floor is not negotiable: strlen alone unwinds once
+  # per character, so a 46-character input needs ~47 before the parse loop is
+  # even reached -- ~1.7 GB and ~5m45s a side. The guard is only so a host with
+  # no headroom cannot OOM-kill a proof and leave a log that reads clean.
   local free_gb; free_gb=$(free -g | awk '/^Mem:/ {print $7}')
-  if (( ${free_gb:-0} < 70 )); then
-    echo "  SKIP  the D-1 pair needs ~60 GB free; this host has ${free_gb} GB"
+  if (( ${free_gb:-0} < 4 )); then
+    echo "  SKIP  the D-1 pair needs ~2 GB free; this host has ${free_gb} GB"
     return
   fi
   out=$(esbmc "${common[@]}" --unwind 55 "${d1[@]}" $h $pristine $stub 2>&1)

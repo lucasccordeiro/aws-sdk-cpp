@@ -104,14 +104,21 @@ someone thought to try. Only the SUCCESSFUL direction needs the full unwind; a
 counterexample is sound at any depth, which is why the two directions run at
 different bounds.
 
-**Cost.** The D-2 pair is a couple of GB and about 30 seconds a side. The D-1
-pair is not: `strlen` unwinds once per character, so its 46-character input
-needs ~47 iterations before the parse loop is even entered, and the run peaks
-near 60 GB. There is no cheaper bound — dropping to `--unwind 20` does not find
-the overflow sooner, it just truncates `strlen` and reaches nothing. The leg
-therefore skips the D-1 pair below 70 GB free rather than invite the OOM killer,
-which on a loaded host will otherwise take the script with it and leave a
-half-finished log that reads like a clean run.
+**Cost**, measured with `/usr/bin/time -v` on 2026-08-25 (ESBMC 8.4.0,
+Bitwuzla, 32 cores):
+
+| Obligation | Peak RSS | Wall |
+|---|---|---|
+| D-2, either source | 0.6 GB | 18–28 s |
+| D-1, either source | 1.7 GB | ~5m45s |
+
+D-1 is the expensive half because `strlen` unwinds once per character, so its
+46-character input needs ~47 iterations before the parse loop is even entered.
+There is no cheaper bound — dropping to `--unwind 20` does not find the overflow
+sooner, it just truncates `strlen` and reaches nothing. The leg checks free
+memory before starting the D-1 pair and skips below 4 GB, so that a host with no
+headroom cannot OOM-kill a proof and leave a half-finished log that reads like a
+clean run.
 
 `--include-file cctype` is needed throughout: ESBMC's `<iostream>` and
 `<cstring>` do not pull in `<cctype>` transitively, and the standard does not
@@ -122,10 +129,8 @@ Solver coverage is uneven, and the table should be read with that in mind. Both
 D-2 rows agree under Bitwuzla and Z3. The D-1 SUCCESSFUL row is **Bitwuzla
 only** — Z3 was still unwinding after 40 minutes on a host at load 38 and never
 reached a verdict, so that row is single-solver until it is re-run somewhere
-quiet. Both D-1 rows were measured with the input written into the harness
-directly, before the `-D` wiring the leg now uses existed; the wiring produces
-the same literal in the GOTO program, but the rows have not been re-measured
-through it on a host with the memory to do so.
+quiet. All four rows were measured through the `-D` wiring the leg uses, not
+with the input inlined in the harness.
 
 ### Reachability, read off the pinned commit
 

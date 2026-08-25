@@ -355,12 +355,22 @@ The SUCCESSFUL rows are the stronger half, for two reasons that are easy to lose
 
 **Caveats, so the table is not read as more than it is.** Both D-2 rows agree
 under Bitwuzla and Z3; the D-1 SUCCESSFUL row is Bitwuzla only, because Z3 was
-still unwinding after 40 minutes on a host at load 38. The D-1 pair peaks near
-60 GB — one run was OOM-killed mid-proof during this work — so `reproduce.sh
-module` skips it below 70 GB free rather than report a killed run as a clean
-one. And the D-1 rows were measured with the input inlined in the harness,
-before the `-D` parameterisation the leg now uses; that wiring puts the same
-literal in the GOTO program but the rows have not been re-measured through it.
+still unwinding after 40 minutes on a host at load 38. Every row was re-measured
+on 2026-08-25 through the `-D` parameterisation the leg uses, rather than with
+the input inlined in the harness.
+
+That re-measurement also corrected the cost figures this report previously
+carried. `/usr/bin/time -v` puts the D-1 pair at **1.7 GB** peak and ~5m45s a
+side, not the ~60 GB claimed here earlier. The earlier figure was taken on a
+host where 107 GB was resident in unrelated wedged ESBMC processes — running
+since 2026-08-20, still there on 2026-08-25 — so what exhausted that host was
+those processes, not this obligation.
+
+The correction matters because the guard was set from the wrong number.
+`reproduce.sh module` now skips below 4 GB free rather than 70 GB: at the old
+bar the D-1 pair would have skipped on any ordinary machine, so the leg's more
+expensive obligation would quietly never run — while the OOM it was guarding
+against cannot occur at a 1.7 GB peak.
 
 This does **not** retire the extracted harnesses. They remain the cheap,
 portable version of the same two obligations, they run in seconds rather than
