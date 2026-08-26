@@ -353,11 +353,18 @@ The SUCCESSFUL rows are the stronger half, for two reasons that are easy to lose
    `datetime_cases.cpp` tries. That is a proof about the guard rather than a
    sample of it.
 
-**Caveats, so the table is not read as more than it is.** Both D-2 rows agree
-under Bitwuzla and Z3; the D-1 SUCCESSFUL row is Bitwuzla only, because Z3 was
-still unwinding after 40 minutes on a host at load 38. Every row was re-measured
-on 2026-08-25 through the `-D` parameterisation the leg uses, rather than with
-the input inlined in the harness.
+**Solver coverage: all four rows now agree under Bitwuzla and Z3.** Every row
+was measured on 2026-08-25 through the `-D` parameterisation the leg uses,
+rather than with the input inlined. The D-1 SUCCESSFUL row was Bitwuzla-only
+until 2026-08-26 — Z3 had been left unwinding for 40 minutes on a host at load
+38 without reaching a verdict — and re-running it on an idle host closed that:
+SUCCESSFUL, unwinding assertions passing, 7m06s at 1.8 GB.
+
+That re-run also explains the original non-result, which is worth recording
+because it would otherwise read as a solver weakness. Z3's decision procedure
+takes **4.6 s**; the remaining seven minutes are symbolic execution, which is
+solver-independent. What the loaded host starved was symex, so no amount of
+waiting on Z3 specifically was ever going to be the fix.
 
 That re-measurement also corrected the cost figures this report previously
 carried. `/usr/bin/time -v` puts the D-1 pair at **1.7 GB** peak and ~5m45s a

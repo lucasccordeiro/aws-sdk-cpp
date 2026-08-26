@@ -112,6 +112,8 @@ Bitwuzla, 32 cores):
 | D-2, either source | 0.6 GB | 18–28 s |
 | D-1, either source | 1.7 GB | ~5m45s |
 
+Those are Bitwuzla figures; Z3 on the D-1 fixed source costs 1.8 GB and 7m06s.
+
 D-1 is the expensive half because `strlen` unwinds once per character, so its
 46-character input needs ~47 iterations before the parse loop is even entered.
 There is no cheaper bound — dropping to `--unwind 20` does not find the overflow
@@ -125,12 +127,14 @@ clean run.
 require them to. A forced include keeps `vendor/` pristine where an edit would
 not.
 
-Solver coverage is uneven, and the table should be read with that in mind. Both
-D-2 rows agree under Bitwuzla and Z3. The D-1 SUCCESSFUL row is **Bitwuzla
-only** — Z3 was still unwinding after 40 minutes on a host at load 38 and never
-reached a verdict, so that row is single-solver until it is re-run somewhere
-quiet. All four rows were measured through the `-D` wiring the leg uses, not
-with the input inlined in the harness.
+All four rows agree under **both Bitwuzla and Z3**, and were measured through
+the `-D` wiring the leg uses rather than with the input inlined. The D-1
+SUCCESSFUL row was single-solver until 2026-08-26, when it was re-run on an idle
+host: Z3 reaches the same verdict in 7m06s at 1.8 GB, with the unwinding
+assertions passing. Worth knowing why it looked hung before — Z3's decision
+procedure takes **4.6 s** of that; the rest is symbolic execution. The earlier
+40-minute non-result on a host at load 38 was that symex being starved, not a
+solver struggling with the formula.
 
 ### Reachability, read off the pinned commit
 
