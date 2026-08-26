@@ -25,6 +25,15 @@ our field-width patch verbatim and adding a range check of its own. These went
 out as a defense-in-depth change with no CVE — neither is memory corruption. See
 [verification/datetime/](verification/datetime/).
 
+`Aws::Utils::HashingUtils::HexDecode` was examined the same way and does not
+validate its input: the character guard admits every letter rather than the hex
+digits, and reports a failure only through an `assert`. Malformed strings decode
+to full-length buffers, and distinct strings alias to the same bytes — `"K1"`
+decodes to the byte `"41"` decodes to. There is no memory-safety consequence and no
+untrusted caller inside the SDK, so this is a latent hardening bug in public API
+rather than a security report. A patch and the proofs are in
+[verification/hex/](verification/hex/).
+
 A short public write-up of the exercise was
 [posted on 2026-08-13](https://www.linkedin.com/posts/lucas-cordeiro-3156233_formalverification-memorysafety-esbmc-share-7493503595426963457-OZeH/),
 with AWS's permission.
