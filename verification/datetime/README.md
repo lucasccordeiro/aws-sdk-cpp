@@ -43,7 +43,9 @@ response header. A validated patch is in `fix/`.
 
 Needs ESBMC 8.4.0, a C++11 compiler and curl. Each leg also runs alone:
 `./reproduce.sh esbmc | sanitizer | tests | reachability | fix`. Set `CXX` to
-choose the compiler.
+choose the compiler. A sixth leg, `module`, re-runs the two ESBMC obligations
+against the whole translation unit instead of the extracted models; it is
+minutes per obligation rather than seconds, so `all` leaves it out.
 
 **Platform.** D-2's *runtime* legs need a nanosecond `system_clock`, i.e.
 libstdc++. On libc++ — the default on macOS — that clock counts microseconds and
@@ -62,6 +64,7 @@ what would need explaining.
 | **Tests** | Ordinary `-O0` build, no sanitizer: on libstdc++ 6 of 10 contract cases fail, printing the wrong dates |
 | **Reachability** | The response-header paths that carry attacker-influenced input, read off the pinned commit |
 | **Fix** | The same reproducers against 1.11.877: both defects gone, and the parser hunks are ours unchanged |
+| **Module** (opt-in) | The two ESBMC obligations against the real `DateTimeCommon.cpp`, both versions |
 
 ### ESBMC — the boundaries are proved, not measured
 
@@ -74,6 +77,64 @@ what would need explaining.
 
 Each pair is the finding: FAILED shows the overflow is reachable, SUCCESSFUL
 pins the boundary. Both SUCCESSFUL runs agree under Bitwuzla and Z3.
+
+### The same properties, on the module itself
+
+The obligations above run against line-faithful *extractions*
+(`d1_accumulator_esbmc.c`, `d2_time_point_esbmc.c`) — which is what ESBMC could
+manage when they were written, because the real translation unit did not parse.
+It does now: esbmc/esbmc#7141 modelled `timegm`, and #7138-7140 removed the
+`basic_string` false positives. So `./reproduce.sh module` puts the same two
+properties to `vendor/source/utils/DateTimeCommon.cpp` itself, with 1.11.877
+beside it.
+
+| Obligation | Source | Verdict |
+|---|---|---|
+| D-1, 20-digit RFC822 day | 1.11.869 | **FAILED** — `!overflow("*", …tm_mday, 10)` at `DateTimeCommon.cpp:482` |
+| D-1, same input | 1.11.877 | **SUCCESSFUL** — 362 properties, unwinding assertions passed |
+| D-2, ordinary ISO 8601 date | 1.11.869 | **FAILED** — `arithmetic overflow on mul` in `<chrono>` |
+| D-2, same input | 1.11.877 | **SUCCESSFUL** — 232 properties, unwinding assertions passed |
+
+Two things make the SUCCESSFUL rows worth more than the ten contract cases. The
+unwind is **complete** — the unwinding assertions pass rather than being
+suppressed, so no truncated loop is being read as a proof — and ESBMC models
+`timegm` as returning an unconstrained `time_t`, so the range check is shown to
+hold for *every* seconds value a parse could yield rather than for the dates
+someone thought to try. Only the SUCCESSFUL direction needs the full unwind; a
+counterexample is sound at any depth, which is why the two directions run at
+different bounds.
+
+**Cost**, measured with `/usr/bin/time -v` on 2026-08-25 (ESBMC 8.4.0,
+Bitwuzla, 32 cores):
+
+| Obligation | Peak RSS | Wall |
+|---|---|---|
+| D-2, either source | 0.6 GB | 18–28 s |
+| D-1, either source | 1.7 GB | ~5m45s |
+
+Those are Bitwuzla figures; Z3 on the D-1 fixed source costs 1.8 GB and 7m06s.
+
+D-1 is the expensive half because `strlen` unwinds once per character, so its
+46-character input needs ~47 iterations before the parse loop is even entered.
+There is no cheaper bound — dropping to `--unwind 20` does not find the overflow
+sooner, it just truncates `strlen` and reaches nothing. The leg checks free
+memory before starting the D-1 pair and skips below 4 GB, so that a host with no
+headroom cannot OOM-kill a proof and leave a half-finished log that reads like a
+clean run.
+
+`--include-file cctype` is needed throughout: ESBMC's `<iostream>` and
+`<cstring>` do not pull in `<cctype>` transitively, and the standard does not
+require them to. A forced include keeps `vendor/` pristine where an edit would
+not.
+
+All four rows agree under **both Bitwuzla and Z3**, and were measured through
+the `-D` wiring the leg uses rather than with the input inlined. The D-1
+SUCCESSFUL row was single-solver until 2026-08-26, when it was re-run on an idle
+host: Z3 reaches the same verdict in 7m06s at 1.8 GB, with the unwinding
+assertions passing. Worth knowing why it looked hung before — Z3's decision
+procedure takes **4.6 s** of that; the rest is symbolic execution. The earlier
+40-minute non-result on a host at load 38 was that symex being starved, not a
+solver struggling with the formula.
 
 ### Reachability, read off the pinned commit
 

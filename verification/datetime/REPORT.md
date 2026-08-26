@@ -311,3 +311,76 @@ day past each, the sentinel through RFC822, ISO-8601 and AutoDetect, and the
 9- and 20-digit day inputs — the same shapes as `harnesses/datetime_cases.cpp`,
 guarded the same way on `system_clock::period` so they skip rather than fail
 where the window is wider.
+
+## Verified against the module, not an extraction (2026-08-25)
+
+The ESBMC obligations in `harnesses/d1_accumulator_esbmc.c` and
+`d2_time_point_esbmc.c` are line-faithful *copies* of the two arithmetic sites.
+That was not a choice: when they were written the real translation unit did not
+parse, and an extraction was the only way to get a symbolic verdict at all.
+
+Three of the four gaps behind that have since closed upstream — esbmc/esbmc#7141
+modelled `timegm`, and #7138-7140 removed the `basic_string::size()`,
+`resize()` and `max_size()` false positives. The fourth, `<cctype>` not being
+reachable transitively through `<iostream>`/`<cstring>`, is a fidelity gap
+rather than a defect (the standard does not require the transitivity), and
+`--include-file cctype` covers it without touching `vendor/`.
+
+So `Aws::Utils::DateTime` can now be put to ESBMC as the module it actually is.
+`harnesses/datetime_pristine_esbmc.cpp` compiles the whole pristine TU and
+asserts nothing of its own; every property comes from `--overflow-check`, so no
+verdict can be an artefact of how the harness was phrased. Run against both
+versions:
+
+| Input | 1.11.869 | 1.11.877 |
+|---|---|---|
+| `Wed, 99999999999999999999 Oct 2002 08:00:00 GMT` (RFC822) | **FAILED** — `!overflow("*", …tm_mday, 10)` at `DateTimeCommon.cpp:482` | **SUCCESSFUL** — 362 properties |
+| `2002-10-02T08:00:00Z` (ISO 8601) | **FAILED** — `arithmetic overflow on mul` in `<chrono>` | **SUCCESSFUL** — 232 properties |
+
+The FAILED rows name the same line UBSan named, which is the point of running
+them this way: the extraction could only ever report its own copy of the site.
+
+The SUCCESSFUL rows are the stronger half, for two reasons that are easy to lose:
+
+1. **The unwind is complete.** The unwinding assertions are left on and they
+   *pass*, so no loop was truncated into a proof. This matters more than usual
+   here: `--no-unwinding-assertions` on this codebase yields SUCCESSFUL on
+   truncated loops, which is exactly the false verdict the whole exercise is
+   supposed to avoid.
+2. **`timegm` is unconstrained.** ESBMC models it as returning an arbitrary
+   `time_t`, so `IsSecondsSinceEpochRepresentable` is shown to hold for *every*
+   seconds value a parse could produce — not for the ten dates
+   `datetime_cases.cpp` tries. That is a proof about the guard rather than a
+   sample of it.
+
+**Solver coverage: all four rows now agree under Bitwuzla and Z3.** Every row
+was measured on 2026-08-25 through the `-D` parameterisation the leg uses,
+rather than with the input inlined. The D-1 SUCCESSFUL row was Bitwuzla-only
+until 2026-08-26 — Z3 had been left unwinding for 40 minutes on a host at load
+38 without reaching a verdict — and re-running it on an idle host closed that:
+SUCCESSFUL, unwinding assertions passing, 7m06s at 1.8 GB.
+
+That re-run also explains the original non-result, which is worth recording
+because it would otherwise read as a solver weakness. Z3's decision procedure
+takes **4.6 s**; the remaining seven minutes are symbolic execution, which is
+solver-independent. What the loaded host starved was symex, so no amount of
+waiting on Z3 specifically was ever going to be the fix.
+
+That re-measurement also corrected the cost figures this report previously
+carried. `/usr/bin/time -v` puts the D-1 pair at **1.7 GB** peak and ~5m45s a
+side, not the ~60 GB claimed here earlier. The earlier figure was taken on a
+host where 107 GB was resident in unrelated wedged ESBMC processes — running
+since 2026-08-20, still there on 2026-08-25 — so what exhausted that host was
+those processes, not this obligation.
+
+The correction matters because the guard was set from the wrong number.
+`reproduce.sh module` now skips below 4 GB free rather than 70 GB: at the old
+bar the D-1 pair would have skipped on any ordinary machine, so the leg's more
+expensive obligation would quietly never run — while the OOM it was guarding
+against cannot occur at a 1.7 GB peak.
+
+This does **not** retire the extracted harnesses. They remain the cheap,
+portable version of the same two obligations, they run in seconds rather than
+minutes, and `d2_time_point_esbmc.c` is what ties D-2's boundary to a concrete
+date (`seconds=203605488000`, 8422-01-01) — which the module-level run, with its
+unconstrained `timegm`, deliberately does not.

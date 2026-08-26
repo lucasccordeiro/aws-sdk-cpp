@@ -6,6 +6,10 @@
 #   ./reproduce.sh            all five legs
 #   ./reproduce.sh esbmc      one leg: esbmc | sanitizer | tests | reachability | fix
 #
+# A sixth leg, `module`, discharges the same two properties against the whole
+# pristine translation unit rather than the extracted models. It is minutes per
+# obligation rather than seconds, so `all` leaves it out; run it on its own.
+#
 # D-2's runtime legs need a nanosecond system_clock (libstdc++); on libc++ they
 # are skipped, since its microsecond clock puts these dates inside the window.
 # Set CXX to pick a compiler, or CLOCK_DEN to see another platform's rendering.
@@ -159,14 +163,71 @@ leg_fix() {
     "$(grep SUMMARY <<<"$out")"
 }
 
+# The extracted harnesses exist because ESBMC could not parse the real TU. It
+# can now, so the same properties can be put to the module itself: FAILED on
+# 1.11.869 and SUCCESSFUL on 1.11.877 is the pair. Only the SUCCESSFUL runs need
+# a complete unwind -- a counterexample is sound at any depth -- so the two
+# directions get different bounds, and the unwinding assertions are left ON so a
+# truncated loop cannot pass for a proof.
+leg_module() {
+  echo "[6] Module -- both properties on the pristine TU, not an extraction"
+  command -v esbmc >/dev/null || { echo "  SKIP  esbmc not on PATH"; return; }
+  mkdir -p results
+  local fixed=results/DateTimeCommon.$FIXED_VERSION.cpp
+  [[ -f "$fixed" ]] || curl -fsS "$FIXED_RAW/src/aws-cpp-sdk-core/source/utils/DateTimeCommon.cpp" \
+    -o "$fixed" 2>/dev/null || { echo "  SKIP  no network"; return; }
+
+  local -a common=(--std c++11 --overflow-check --include-file cctype
+                   -I stubs -I vendor -I vendor/include)
+  local -a d1=(-DDT_FORMAT=RFC822 '-DDT_INPUT="Wed, 99999999999999999999 Oct 2002 08:00:00 GMT"')
+  local h=harnesses/datetime_pristine_esbmc.cpp
+  local pristine=vendor/source/utils/DateTimeCommon.cpp
+  local stub=stubs/aws_platform_time_stub.cpp
+
+  # The whole violation block on one line: the site pins D-1 to a source line,
+  # the property text pins D-2. Say so when there is no block at all -- these
+  # runs are big enough to be OOM-killed, and a killed run must not be read as
+  # "the property held".
+  violation() {
+    grep -A3 'Violated property' <<<"$1" | tr '\n' ' ' | grep . ||
+      printf 'no violation reported; run may not have completed: %s' \
+        "$(tail -2 <<<"$1" | tr '\n' ' ')"
+  }
+
+  # D-2 first: an ordinary 20-character date, ~0.6 GB and 20-30 s a side.
+  local out
+  out=$(esbmc "${common[@]}" --unwind 25 $h $pristine $stub 2>&1)
+  check "D-2 overflows the seconds-to-nanoseconds multiply" "arithmetic overflow on mul" \
+    "$(violation "$out")"
+  check "the range check holds on $FIXED_VERSION" "VERIFICATION SUCCESSFUL" \
+    "$(verdict esbmc "${common[@]}" --unwind 25 $h "$fixed" $stub)"
+
+  # D-1 costs more, and the floor is not negotiable: strlen alone unwinds once
+  # per character, so a 46-character input needs ~47 before the parse loop is
+  # even reached -- ~1.7 GB and ~5m45s a side. The guard is only so a host with
+  # no headroom cannot OOM-kill a proof and leave a log that reads clean.
+  local free_gb; free_gb=$(free -g | awk '/^Mem:/ {print $7}')
+  if (( ${free_gb:-0} < 4 )); then
+    echo "  SKIP  the D-1 pair peaks near 1.7 GB and this leg wants 4 GB free;"
+    echo "        this host has ${free_gb} GB"
+    return
+  fi
+  out=$(esbmc "${common[@]}" --unwind 55 "${d1[@]}" $h $pristine $stub 2>&1)
+  check "D-1 overflows the day accumulator at :482" "DateTimeCommon.cpp line 482" \
+    "$(violation "$out")"
+  check "the bounded accumulators hold on $FIXED_VERSION" "VERIFICATION SUCCESSFUL" \
+    "$(verdict esbmc "${common[@]}" --unwind 55 "${d1[@]}" $h "$fixed" $stub)"
+}
+
 case "${1:-all}" in
   esbmc) leg_esbmc ;;
   sanitizer) leg_sanitizer ;;
   tests) leg_tests ;;
   reachability) leg_reachability ;;
   fix) leg_fix ;;
+  module) leg_module ;;
   all) leg_esbmc; leg_sanitizer; leg_tests; leg_reachability; leg_fix ;;
-  *) echo "usage: $0 [all|esbmc|sanitizer|tests|reachability|fix]"; exit 2 ;;
+  *) echo "usage: $0 [all|esbmc|sanitizer|tests|reachability|fix|module]"; exit 2 ;;
 esac
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
