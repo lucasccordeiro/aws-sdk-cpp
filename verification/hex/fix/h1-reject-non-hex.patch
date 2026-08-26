@@ -1,0 +1,27 @@
+--- a/src/aws-cpp-sdk-core/source/utils/HashingUtils.cpp
++++ b/src/aws-cpp-sdk-core/source/utils/HashingUtils.cpp
+@@ -171,6 +171,11 @@
+     return encoded;
+ }
+ 
++static bool IsHexDigit(char c)
++{
++    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
++}
++
+ ByteBuffer HashingUtils::HexDecode(const Aws::String& str)
+ {
+     //number of characters should be even
+@@ -196,10 +201,11 @@
+ 
+     for (size_t i = readIndex; i < str.length(); i += 2)
+     {
+-        if(!StringUtils::IsAlnum(str[i]) || !StringUtils::IsAlnum(str[i + 1]))
++        if(!IsHexDigit(str[i]) || !IsHexDigit(str[i + 1]))
+         {
+             //contains non-hex characters
+             assert(0);
++            return ByteBuffer();
+         }
+ 
+         char firstChar = str[i];
