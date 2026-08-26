@@ -208,7 +208,8 @@ leg_module() {
   # no headroom cannot OOM-kill a proof and leave a log that reads clean.
   local free_gb; free_gb=$(free -g | awk '/^Mem:/ {print $7}')
   if (( ${free_gb:-0} < 4 )); then
-    echo "  SKIP  the D-1 pair needs ~2 GB free; this host has ${free_gb} GB"
+    echo "  SKIP  the D-1 pair peaks near 1.7 GB and this leg wants 4 GB free;"
+    echo "        this host has ${free_gb} GB"
     return
   fi
   out=$(esbmc "${common[@]}" --unwind 55 "${d1[@]}" $h $pristine $stub 2>&1)
