@@ -109,7 +109,8 @@ The first two are shimmed in `stubs/esbmc/` — they are *SDK* headers, so a
 substitute is on the include path rather than an edit. The third names a member
 of a model class directly and cannot be shimmed from outside ESBMC. None of the
 three is anywhere near `HexDecode`: they are in the SHA-256 tree hash and in
-stream typedefs. Not filed upstream yet.
+stream typedefs. Filed upstream as esbmc/esbmc#7331 (`std::list`), #7332 (the
+stream aliases) and #7333 (`pos_type`), each with a standalone reproducer.
 
 The whole module is analysed natively, by the sanitizer and test legs, which
 have no such gap.

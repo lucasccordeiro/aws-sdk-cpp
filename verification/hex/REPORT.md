@@ -222,8 +222,8 @@ The first two are SDK headers, so `stubs/esbmc/` substitutes them on the ESBMC
 include path only and the native builds keep the pristine ones. The third names
 a member of a model class, which nothing outside ESBMC can add; `-D
 pos_type=streampos` was tried and breaks the model's own `streambuf`. None of
-the three is within reach of `HexDecode`. They are the natural next issues to
-file, on the pattern of esbmc/esbmc#7138-7141.
+the three is within reach of `HexDecode`. Filed on 2026-08-26 as esbmc/esbmc#7331,
+#7332 and #7333, on the pattern of #7138-7141.
 
 The native legs have no such restriction: the sanitizer and test binaries link
 the whole pristine `HashingUtils.cpp`, with link stubs only for the hash classes
