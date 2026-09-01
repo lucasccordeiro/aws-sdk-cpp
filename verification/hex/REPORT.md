@@ -156,6 +156,32 @@ Census over all 65 536 two-character inputs, computed by the same binary
 | byte values produced | 256 |
 | largest preimage | 25 strings |
 
+### Through a public API
+
+`./reproduce.sh entrypoint` runs the same module from one public SDK call —
+`UUID(const Aws::String&)`, the caller enumerated under "Reachability" — with
+`HexDecode` never named. The 36-character argument is what an application would
+have parsed out of a request or a config file:
+
+| Argument | Renders as | Note |
+|---|---|---|
+| `550e8400-e29b-41d4-a716-446655440000` | `550E8400-E29B-41D4-A716-446655440000` | well formed, round-trips |
+| `550e8400-e29b-K1d4-a716-446655440000` | `550E8400-E29B-41D4-A716-446655440000` | **the `K` is accepted, then erased** |
+| `GGGGGGGG-GGGG-GGGG-GGGG-GGGGGGGGGGGG` | `10101010-1010-1010-1010-101010101010` | no hex digit anywhere |
+| `0G0G0G0G-0G0G-0G0G-0G0G-0G0G0G0G0G0G` | `10101010-1010-1010-1010-101010101010` | aliases the row above, bytes and all |
+
+Row 2 returns the 16 bytes of row 1, so neither the `ByteBuffer` nor the
+rendered string distinguishes them. The debug build answers identically: the
+asserts at `UUID.cpp:37` and `:41` are length checks that hold on any
+36-character four-dash string, and `HashingUtils.cpp:202` — the one `IsAlnum`
+guards — is never reached. ASan and UBSan report nothing on any row of either
+build. No build configuration available to an application surfaces this.
+
+This is the two-character result embedded in a realistic argument; it is
+executed, not proved, and the machine-checked statement remains the
+two-character one below. It is reported because it fixes what the defect costs
+a caller who never heard of `HexDecode`.
+
 ## Symbolic confirmation (ESBMC)
 
 ### Configuration, and why each flag is there
@@ -209,8 +235,8 @@ tree, and the reachability leg diffs the vendored file against
 shipped ones.
 
 What the slice drops is the other 20 functions of the translation unit, none of
-which `HexDecode` calls. That is not a modelling choice; ESBMC 8.4.0 cannot
-parse the file. Three operational-model gaps:
+which `HexDecode` calls. That is not a modelling choice; ESBMC cannot parse the
+file — confirmed on 8.4.0 and again on 8.5.0. Three operational-model gaps:
 
 | Gap | Where it bites | Model |
 |---|---|---|
@@ -224,6 +250,15 @@ a member of a model class, which nothing outside ESBMC can add; `-D
 pos_type=streampos` was tried and breaks the model's own `streambuf`. None of
 the three is within reach of `HexDecode`. Filed on 2026-08-26 as esbmc/esbmc#7331,
 #7332 and #7333, on the pattern of #7138-7141.
+
+A fourth blocker is not an ESBMC defect and is not filed. `HashingUtils.cpp`
+calls `isalpha` and `toupper` (`:208`, `:210`, `:219`, `:221`) without including
+`<cctype>`, relying on a transitive include that ESBMC's headers do not provide;
+under them the identifiers are undeclared. The standard guarantees only that a
+header supplies its own synopsis ([res.on.headers]) — nothing guarantees that
+some other header supplies `<cctype>`'s — so this is fragile in the SDK rather
+than missing in the model. The slice's prologue includes `<cctype>` explicitly,
+which is why it parses where the whole file does not.
 
 The native legs have no such restriction: the sanitizer and test binaries link
 the whole pristine `HashingUtils.cpp`, with link stubs only for the hash classes
@@ -290,26 +325,38 @@ it: a debug build still stops at the same place. Well-formed input is
 untouched — prefix stripping and case-insensitivity are unchanged, and the five
 well-formed contract cases pass identically before and after.
 
-After the patch, all six ESBMC properties and all 13 contract cases pass under
-both solvers (`./reproduce.sh fix`).
+After the patch, all three ESBMC properties re-verify under both solvers, and
+all 13 contract cases pass in the native build (`./reproduce.sh fix`).
 
 ### The one caller that changes
 
 `UUID.cpp:43` `memcpy`s `rawUuid.GetUnderlyingData()`, which is `nullptr` for an
-empty `Array` (`Array.h:45`). A non-hex UUID string would therefore reach
+empty `Array` (`Array.h:45`). A non-hex UUID string therefore reaches
 `memcpy(dst, nullptr, 0)` — undefined per C17 7.24.1p2 via 7.1.4p1, benign on
 every implementation we know of, and **already reachable today** for an
-odd-length de-dashed body. Measured, not argued:
+odd-length de-dashed body. Both halves measured, not argued — the patched
+entry-point build on a non-hex string (`./reproduce.sh fix`), and the pristine
+one on an odd-length string:
 
 ```
-$ ./results/uuid_asan_ndebug "12345678-1234-1234-1234-12345678901"
+$ ./results/entrypoint_uuid_fixed_asan            # patched, "...-K1d4-..."
+vendor/source/utils/UUID.cpp:43:19: runtime error: null pointer passed as
+    argument 2, which is declared to never be null
+
+$ ../uuid/results/uuid_asan_ndebug "12345678-1234-1234-1234-12345678901"  # U-1
 vendor/source/utils/UUID.cpp:43:19: runtime error: null pointer passed as
     argument 2, which is declared to never be null
 ```
 
-That belongs to U-1's file, not to `HexDecode`; the patch widens the set of
-inputs that take an existing path rather than creating one. A caller-side fix
-would guard the `memcpy` on `GetLength() != 0`.
+Same line, same diagnostic, with and without the patch: the patch widens the set
+of inputs that take an existing path rather than creating one. That belongs to
+U-1's file, not to `HexDecode`. A caller-side fix would guard the `memcpy` on
+`GetLength() != 0`.
+
+The patch also does not give this constructor an error channel it never had.
+Every rejected string now yields the nil UUID, so the two no-hex arguments in
+the table above still parse alike — distinguishable from a decode failure only
+by a change to `UUID`'s own signature, which is outside this finding.
 
 ## Not claimed
 
@@ -321,22 +368,25 @@ would guard the `memcpy` on `GetLength() != 0`.
   does with the bytes.
 - **No claim about longer inputs beyond the obvious.** The proofs are over
   two-character inputs, which is one decode iteration. Longer strings repeat the
-  same loop body, so the same witnesses embed in them — but that is an argument,
-  not a machine-checked statement, and only the two-character statement is
-  proved.
+  same loop body, so the same witnesses embed in them — the entry-point leg
+  executes exactly that on a 36-character UUID string — but embedding is
+  demonstrated by running it, not machine-checked, and only the two-character
+  statement is proved.
 - **Not a regression.** The code is unchanged between 1.11.869, where U-1 was
   found, and 1.11.878.
 
 ## Reproducing
 
 ```sh
-./reproduce.sh              # 37 checks, ~2 min
-./reproduce.sh esbmc        # or one leg at a time
+./reproduce.sh              # 51 checks, ~3 min
+./reproduce.sh esbmc        # or one leg at a time: esbmc, sanitizer,
+                            # tests, reachability, entrypoint, fix
 ```
 
 Everything ESBMC and the native builds analyse is byte-for-byte upstream
 1.11.878, pinned by `vendor/UPSTREAM_VERSION` and `vendor/UPSTREAM_COMMIT` and
-re-checked against `raw.githubusercontent.com` by the reachability leg. `stubs/`
+re-checked file by file — all 36 — against `raw.githubusercontent.com` by the
+reachability leg, which fetches by commit rather than by the movable tag. `stubs/`
 holds only verification-only substitutes, each documenting what it stands in
 for.
 

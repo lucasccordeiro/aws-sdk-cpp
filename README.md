@@ -29,9 +29,13 @@ out as a defense-in-depth change with no CVE — neither is memory corruption. S
 validate its input: the character guard admits every letter rather than the hex
 digits, and reports a failure only through an `assert`. Malformed strings decode
 to full-length buffers, and distinct strings alias to the same bytes — `"K1"`
-decodes to the byte `"41"` decodes to. There is no memory-safety consequence and no
-untrusted caller inside the SDK, so this is a latent hardening bug in public API
-rather than a security report. A patch and the proofs are in
+decodes to the byte `"41"` decodes to. Through the one public API that hands it
+a caller-supplied string, `UUID(const Aws::String&)`, that means
+`550e8400-e29b-K1d4-a716-446655440000` parses to the bytes of
+`550e8400-e29b-41d4-a716-446655440000` and renders as it, in release and debug
+builds alike, with ASan and UBSan silent. There is no memory-safety consequence
+and no untrusted caller inside the SDK, so this is a latent hardening bug in
+public API rather than a security report. A patch and the proofs are in
 [verification/hex/](verification/hex/).
 
 A short public write-up of the exercise was

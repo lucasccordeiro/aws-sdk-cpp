@@ -52,13 +52,13 @@ what an application passes it is outside this repository.
 ## Run it
 
 ```sh
-./reproduce.sh          # 37 checks, ~2 min
+./reproduce.sh          # 51 checks, ~3 min
 ```
 
-Needs ESBMC 8.4.0 (Bitwuzla and Z3), a C++11 compiler and curl. Each leg also
-runs alone: `./reproduce.sh esbmc | sanitizer | tests | reachability | fix`. Set
-`CXX` to choose the compiler. Expect **37 passed, 0 failed**; a failure is what
-would need explaining.
+Needs ESBMC 8.4.0 or 8.5.0 (Bitwuzla and Z3), a C++11 compiler and curl. Each leg also
+runs alone: `./reproduce.sh esbmc | sanitizer | tests | reachability |
+entrypoint | fix`. Set `CXX` to choose the compiler. Expect **51 passed, 0
+failed**; a failure is what would need explaining.
 
 | Leg | What it establishes |
 |---|---|
@@ -66,6 +66,7 @@ would need explaining.
 | **Sanitizers** | The same on the whole pristine module — and that ASan and UBSan have nothing to say about it |
 | **Tests** | Ordinary release build: 8 of 13 contract cases fail, plus the census above |
 | **Reachability** | The two non-test callers at the pinned tag, and what each one passes |
+| **Entry point** | The same defect through one public API call — `UUID(const Aws::String&)` — with `HexDecode` never named |
 | **Fix** | `fix/h1-reject-non-hex.patch`: every contract case and every ESBMC property goes green |
 
 ### ESBMC — the acceptance is proved, not sampled
@@ -96,8 +97,8 @@ the harness could not state a property at all under it.
 The ESBMC legs analyse `HexDecode` **sliced out of the pristine file at run
 time** by `reproduce.sh` — upstream bytes, never a hand-written copy, and the
 same leg re-slices the patched file for the fix. The rest of the translation
-unit is dropped because ESBMC 8.4.0 cannot parse it. Three operational-model
-gaps, each of which stops the parse dead:
+unit is dropped because ESBMC cannot parse it — confirmed on 8.4.0 and again on
+8.5.0. Three operational-model gaps, each of which stops the parse dead:
 
 | Gap | Where |
 |---|---|
@@ -111,6 +112,12 @@ of a model class directly and cannot be shimmed from outside ESBMC. None of the
 three is anywhere near `HexDecode`: they are in the SHA-256 tree hash and in
 stream typedefs. Filed upstream as esbmc/esbmc#7331 (`std::list`), #7332 (the
 stream aliases) and #7333 (`pos_type`), each with a standalone reproducer.
+
+A fourth blocker is the SDK's, not ESBMC's, and is not filed: `HashingUtils.cpp`
+calls `isalpha`/`toupper` without including `<cctype>`, and the standard
+guarantees only that a header supplies its own synopsis ([res.on.headers]). The
+slice includes it explicitly, which is part of why it parses where the whole
+file does not.
 
 The whole module is analysed natively, by the sanitizer and test legs, which
 have no such gap.
@@ -132,6 +139,44 @@ itself, and the signer's argument is hex by construction. A search across
 GitHub finds third-party hits only in vendored copies of the SDK — which is
 weak evidence, since code search indexes default branches and caps its results,
 but it is what there is.
+
+### What it looks like from an entry point
+
+The reachability table names `UUID.cpp:42` as the one SDK caller that passes
+`HexDecode` a string from outside. `harnesses/hex_entrypoint_uuid.cpp` calls
+that caller and reads the result back through `UUID`'s own conversions: one
+public API — `UUID(const Aws::String&)` — with `HexDecode` never named. Every line below is what an application parsing a UUID
+string out of a request, a config file or a database column gets back today.
+
+```
+well-formed  550e8400-e29b-41d4-a716-446655440000  -> 550E8400-E29B-41D4-A716-446655440000
+one 'K'      550e8400-e29b-K1d4-a716-446655440000  -> 550E8400-E29B-41D4-A716-446655440000
+all 'G'      GGGGGGGG-GGGG-GGGG-GGGG-GGGGGGGGGGGG  -> 10101010-1010-1010-1010-101010101010
+'0G' pairs   0G0G0G0G-0G0G-0G0G-0G0G-0G0G0G0G0G0G  -> 10101010-1010-1010-1010-101010101010
+```
+
+The second row is the finding in one line. `'K'` is not a hex digit and every
+UUID parser is required to reject it; this one accepts the string, returns the
+16 bytes of the *well-formed* UUID above it, and renders those bytes with the
+`'K'` gone. An application comparing either the bytes or the rendered string
+cannot tell the two inputs apart. The last two rows go further: two strings with
+no hex digit anywhere parse to each other's bytes, and to a UUID that looks
+entirely well-formed.
+
+This is the two-character aliasing embedded in a real 36-character argument, so
+it is a demonstration rather than a proof — the machine-checked statement is the
+ESBMC one above, over two-character inputs. Three things make it worth running
+anyway: it needs no knowledge of `HexDecode`, **a debug build answers exactly
+the same**, and ASan and UBSan stay silent on both builds. The asserts do not
+help: `UUID.cpp:37` and `:41` check only length, which a 36-character four-dash
+string satisfies whatever its characters are, and `HashingUtils.cpp:202` is
+never reached because `IsAlnum` admits the letters. There is no build
+configuration and no sanitizer that shows an application this is happening.
+
+What it is not is a path from the wire. No caller inside the SDK hands the
+string constructor untrusted input — that was enumerated for U-1 and holds here
+(see [../uuid/REPORT.md](../uuid/REPORT.md) "Reachability"). The input in this
+harness comes from `main`, which is exactly the position an application is in.
 
 ## Fix
 
@@ -157,12 +202,27 @@ so it can alias nothing, and every character that now reaches `isalpha` is in
 input is untouched: the `0x`/`0X` prefix is still stripped, case is still
 ignored, and the five well-formed contract cases pass before and after.
 
-One caller sees a behaviour change. `UUID.cpp:43` `memcpy`s
+At the entry point above, the patched build answers:
+
+```
+one 'K'      550e8400-e29b-K1d4-a716-446655440000  -> 00000000-0000-0000-0000-000000000000
+```
+
+The impersonation is gone — the `'K'` string no longer returns a real UUID's
+bytes. What replaces it is the nil UUID, for every rejected string alike, so
+the two no-hex rows still parse to each other. That collision survives the
+patch because `UUID(const Aws::String&)` has no error channel of its own: it
+`memcpy`s whatever length it is given onto a zeroed buffer, and a rejection is
+zero bytes. Distinguishing "rejected" from "the nil UUID" is a change to that
+constructor's signature, not to `HexDecode`, and is out of scope here.
+
+The same constructor is where the patch costs something. `UUID.cpp:43` `memcpy`s
 `rawUuid.GetUnderlyingData()`, which is `nullptr` for an empty buffer
-(`Array.h:45`), so a non-hex UUID string would join the odd-length one on a
-`memcpy(dst, nullptr, 0)` — undefined per C17 7.24.1p2 by way of 7.1.4p1, and
-UBSan says so today: `null pointer passed as argument 2` at `UUID.cpp:43` for
-`"12345678-1234-1234-1234-12345678901"` under `-DNDEBUG`. That path is reachable
+(`Array.h:45`), so a non-hex UUID string joins the odd-length one on a
+`memcpy(dst, nullptr, 0)` — undefined per C17 7.24.1p2 by way of 7.1.4p1. UBSan
+says so on the patched entry-point build, `null pointer passed as argument 2` at
+`UUID.cpp:43`, and says the same thing *unpatched* for the odd-length input
+`"12345678-1234-1234-1234-12345678901"` under `-DNDEBUG`. The path is reachable
 without this patch; the patch widens the set of inputs that take it. It belongs
 to U-1, not to H-1, and is recorded in [../uuid/](../uuid/).
 
