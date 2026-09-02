@@ -1,23 +1,33 @@
 #!/usr/bin/env bash
 # Reproduces H-1 end to end: ESBMC proofs, native witnesses, contract cases,
-# reachability, and the proposed fix. Run from this directory. Exits 0 only if
-# every leg matches.
+# reachability, one public entry point, and the proposed fix. Run from this
+# directory. Exits 0 only if every leg matches.
 #
-#   ./reproduce.sh            all five legs
-#   ./reproduce.sh esbmc      one leg: esbmc | sanitizer | tests | reachability | fix
+#   ./reproduce.sh            all six legs
+#   ./reproduce.sh esbmc      one leg: esbmc | sanitizer | tests | reachability |
+#                             entrypoint | fix
 #
-# Needs ESBMC 8.4.0 (with Z3 and Bitwuzla), a C++11 compiler and curl.
+# Needs ESBMC 8.4.0 or 8.5.0 (with Z3 and Bitwuzla), a C++11 compiler and curl.
 
 set -u
 
 UPSTREAM_VERSION=$(cat vendor/UPSTREAM_VERSION)
 UPSTREAM_COMMIT=$(cat vendor/UPSTREAM_COMMIT)
-RAW=https://raw.githubusercontent.com/aws/aws-sdk-cpp/$UPSTREAM_VERSION
+# A tag can be moved; the commit cannot. REPORT.md tells the reader both pin
+# the evidence, so the re-check has to use the one that actually holds.
+RAW=https://raw.githubusercontent.com/aws/aws-sdk-cpp/$UPSTREAM_COMMIT
 CORE=src/aws-cpp-sdk-core
 MODULE=vendor/source/utils/HashingUtils.cpp
+# Pins the size of the evidence tree, so a vanished vendor/ fails loudly
+# instead of passing a drift check it never ran.
+VENDORED_FILES=36
 CXX=${CXX:-g++}
 INCLUDES="-Istubs -Ivendor -Ivendor/include"
 LINK="vendor/source/utils/base64/Base64.cpp stubs/aws_crypto_link_stub.cpp stubs/aws_memory_stub.cpp"
+# The entry-point leg drives HexDecode through UUID's string constructor, so it
+# links the two further pristine files that constructor needs.
+ENTRYPOINT="vendor/source/utils/UUID.cpp vendor/source/utils/StringUtils.cpp stubs/aws_random_link_stub.cpp"
+SAN="-fsanitize=address,undefined -fno-omit-frame-pointer"
 
 # ESBMC cannot parse the whole translation unit yet -- three operational-model
 # gaps, listed in README.md "Why a slice". Both legs below therefore analyse a
@@ -40,6 +50,20 @@ verdict() {
   grep -m1 -E '^VERIFICATION (SUCCESSFUL|FAILED)' <<<"$out" ||
     printf 'no verdict; last lines: %s' "$(tail -3 <<<"$out" | tr '\n' ' ')"
 }
+
+# A build that fails has to be a failure, not a leg that quietly stops: bare
+# `|| return` leaves the totals reading "N passed, 0 failed" and exits 0.
+build() { # build <output> <source...> -- <flags...>
+  local out=$1; shift
+  $CXX -std=c++11 -g -O1 $INCLUDES "$@" -o "$out" && return 0
+  printf '  FAIL  build %s\n' "$out"; fail=$((fail + 1)); return 1
+}
+
+# Counting diagnostics rather than matching an empty string: an empty
+# expectation matches anything. Callers must pass output they captured from a
+# run that also produced a checked answer -- `grep -c` prints 0 for no input,
+# so silence alone cannot tell "clean" from "never ran".
+san_count() { grep -cE 'runtime error|ERROR: AddressSanitizer' <<<"$1"; }
 
 slice() { # slice <source> <destination>
   { cat <<'EOF'
@@ -73,7 +97,7 @@ both_solvers() { # both_solvers <name> <expected> <source> [defines...]
 }
 
 leg_esbmc() {
-  echo "[1/5] ESBMC -- what HexDecode accepts, over bytes sliced from the pristine file"
+  echo "[1/6] ESBMC -- what HexDecode accepts, over bytes sliced from the pristine file"
   command -v esbmc >/dev/null || { echo "  SKIP  esbmc not on PATH"; return; }
   mkdir -p results
   slice "$MODULE" results/hexdecode_pristine.cpp
@@ -100,13 +124,12 @@ leg_esbmc() {
 }
 
 leg_sanitizer() {
-  echo "[2/5] Sanitizers -- the whole pristine module, one input per process"
+  echo "[2/6] Sanitizers -- the whole pristine module, one input per process"
   mkdir -p results
-  local san="-fsanitize=address,undefined -fno-omit-frame-pointer"
-  $CXX -std=c++11 -g -O1 -DNDEBUG $san $INCLUDES harnesses/hex_decode_witness.cpp \
-       "$MODULE" $LINK -o results/witness_release || return
-  $CXX -std=c++11 -g -O1 $san $INCLUDES harnesses/hex_decode_witness.cpp \
-       "$MODULE" $LINK -o results/witness_debug || return
+  build results/witness_release -DNDEBUG $SAN harnesses/hex_decode_witness.cpp \
+        "$MODULE" $LINK || return
+  build results/witness_debug $SAN harnesses/hex_decode_witness.cpp \
+        "$MODULE" $LINK || return
 
   check "\"K1\" decodes to the byte \"41\" decodes to" "decoded=1 bytes: 41" \
     "$(./results/witness_release K1 2>&1)"
@@ -114,11 +137,12 @@ leg_sanitizer() {
     "$(./results/witness_release EW 2>&1)"
   check "a high-bit byte decodes under NDEBUG"         "decoded=1 bytes: 50" \
     "$(./results/witness_release '\x80\x80' 2>&1)"
-  # An empty expectation would match anything, so count the diagnostics and
-  # compare the count.
+  # Tie the silence to a run that demonstrably did the work: check an answer
+  # from the same captured output, not just the absence of diagnostics.
+  local sweep; sweep=$(./results/witness_release K1 EW zz v0 0x41 2>&1)
+  check "the sanitized build decodes all five"         "decoded=1 bytes: F0" "$sweep"
   check "ASan and UBSan stay clean on all of it"       "diagnostics=0" \
-    "diagnostics=$(./results/witness_release K1 EW zz v0 0x41 2>&1 |
-                   grep -cE 'runtime error|ERROR: AddressSanitizer')"
+    "diagnostics=$(san_count "$sweep")"
 
   # Only the non-alnum byte reaches the assert; the letters never do.
   check "a debug build accepts \"K1\" too"             "decoded=1 bytes: 41" \
@@ -129,9 +153,10 @@ leg_sanitizer() {
   # C17 7.4p1: neither sanitizer checks the ctype precondition, so watch the
   # call itself. Against an uninstrumented build -- ASan insists on being first
   # in the preload list and refuses to run behind another interposer.
-  $CXX -std=c++11 -g -O1 -DNDEBUG $INCLUDES harnesses/hex_decode_witness.cpp \
-       "$MODULE" $LINK -o results/witness_plain || return
-  gcc -std=c99 -shared -fPIC -O1 stubs/ctype_precondition_guard.c -o results/ctype_guard.so || return
+  build results/witness_plain -DNDEBUG harnesses/hex_decode_witness.cpp \
+        "$MODULE" $LINK || return
+  gcc -std=c99 -shared -fPIC -O1 stubs/ctype_precondition_guard.c -o results/ctype_guard.so ||
+    { printf '  FAIL  build results/ctype_guard.so\n'; fail=$((fail + 1)); return 1; }
   check "isalpha is called with a negative char"       "isalpha(-128)" \
     "$(LD_PRELOAD=$PWD/results/ctype_guard.so ./results/witness_plain '\x80\x80' 2>&1)"
   check "well-formed input keeps the precondition"     "decoded=1 bytes: 41" \
@@ -139,17 +164,17 @@ leg_sanitizer() {
 }
 
 leg_tests() {
-  echo "[3/5] Contract cases -- ordinary release build, wrong values visible"
+  echo "[3/6] Contract cases -- ordinary release build, wrong values visible"
   mkdir -p results
-  $CXX -std=c++11 -g -O1 -DNDEBUG $INCLUDES harnesses/hex_decode_cases.cpp \
-       "$MODULE" $LINK -o results/cases_pristine || return
+  build results/cases_pristine -DNDEBUG harnesses/hex_decode_cases.cpp \
+        "$MODULE" $LINK || return
   local out; out=$(./results/cases_pristine)
   check "the five well-formed cases pass"  "PASS  41"                      "$out"
   check "the eight H-1 cases fail"         "8 of 13 contract cases failed" "$out"
 
   # The census: how wide the acceptance and the aliasing actually are.
-  $CXX -std=c++11 -g -O1 -DNDEBUG $INCLUDES harnesses/hex_decode_witness.cpp \
-       "$MODULE" $LINK -o results/witness_plain || return
+  build results/witness_plain -DNDEBUG harnesses/hex_decode_witness.cpp \
+        "$MODULE" $LINK || return
   local census; census=$(./results/witness_plain | tr -s ' ')
   check "3844 two-character strings admitted" "guard admits : 3844"   "$census"
   check "3360 of them are not hex"            "not hex : 3360"        "$census"
@@ -158,16 +183,33 @@ leg_tests() {
 }
 
 leg_reachability() {
-  echo "[4/5] Reachability -- who calls HexDecode at $UPSTREAM_VERSION"
+  echo "[4/6] Reachability -- who calls HexDecode at $UPSTREAM_VERSION"
   local tmp; tmp=$(mktemp -d)
   curl -fsS "$RAW/$CORE/source/utils/UUID.cpp" -o "$tmp/UUID.cpp" 2>/dev/null \
     || { echo "  SKIP  no network"; rm -rf "$tmp"; return; }
   curl -fsS "$RAW/$CORE/source/auth/signer/AWSAuthV4Signer.cpp" -o "$tmp/Signer.cpp"
 
-  # The vendored module has to be the shipped one for anything above to count.
-  curl -fsS "$RAW/$CORE/source/utils/HashingUtils.cpp" -o "$tmp/HashingUtils.cpp"
-  check "vendored module is upstream $UPSTREAM_VERSION" "identical" \
-    "$(diff -q "$tmp/HashingUtils.cpp" "$MODULE" >/dev/null && echo identical || echo differs)"
+  # The whole vendored tree, not just the module under test: the entry-point leg
+  # compiles UUID.cpp and StringUtils.cpp, and REPORT.md cites Array.h by line.
+  # Names what drifted, since "differs" alone would not say where to look.
+  local drift="" vendored=0
+  while read -r rel; do
+    vendored=$((vendored + 1))
+    curl -fsS "$RAW/$CORE/$rel" -o "$tmp/upstream" 2>/dev/null &&
+      diff -q "$tmp/upstream" "vendor/$rel" >/dev/null || drift="$drift $rel"
+  done < <(cd vendor && find include source -type f | sort)
+  # The count is asserted, not just printed: an empty vendor tree would leave
+  # `drift` empty too and otherwise read as a clean pass.
+  check "all $VENDORED_FILES vendored files are upstream $UPSTREAM_VERSION" \
+    "$VENDORED_FILES files, no drift" "$vendored files,${drift:- no drift}"
+
+  # stubs/ precedes vendor/include on the include path, so a stub named after a
+  # pinned header would silently replace the evidence -- and the drift check
+  # above, which compares vendor/ to upstream, would still report no drift.
+  check "no stub shadows a vendored header" "none" \
+    "$(comm -12 <(cd stubs && find . -name '*.h' | sed 's|^\./||' | sort) \
+                <(cd vendor/include && find . -name '*.h' | sed 's|^\./||' | sort) |
+       tr '\n' ' ' | grep . || echo none)"
 
   # Two non-test call sites in the whole repository, both feeding HexDecode
   # something the SDK produced itself. See REPORT.md "Reachability" for the
@@ -181,17 +223,75 @@ leg_reachability() {
   rm -rf "$tmp"
 }
 
+leg_entrypoint() {
+  echo "[5/6] Entry point -- one public API call, no mention of HexDecode"
+  mkdir -p results
+  local e_src="harnesses/hex_entrypoint_uuid.cpp $MODULE $ENTRYPOINT $LINK"
+  build results/entrypoint_uuid       -DNDEBUG      $e_src || return
+  build results/entrypoint_uuid_debug               $e_src || return
+  build results/entrypoint_uuid_asan  -DNDEBUG $SAN $e_src || return
+  build results/entrypoint_uuid_asan_debug     $SAN $e_src || return
+
+  # Squeeze the harness's column padding so the expectations stay readable.
+  local out; out=$(./results/entrypoint_uuid | tr -s ' ')
+  check "a 'K' in a UUID string renders as the UUID without it" \
+    "550e8400-e29b-K1d4-a716-446655440000 -> 550E8400-E29B-41D4-A716-446655440000" "$out"
+  check "a string with no hex digit renders well-formed" \
+    "GGGGGGGG-GGGG-GGGG-GGGG-GGGGGGGGGGGG -> 10101010-1010-1010-1010-101010101010" "$out"
+  check "all six observations hold" "0 of 6 checks failed" "$out"
+
+  # UUID.cpp:37 and :41 are length asserts, and a 36-character four-dash input
+  # satisfies both; HashingUtils.cpp:202 is the one IsAlnum keeps unreached. So
+  # a debug build answers the same. This is what separates H-1 from U-1's shape.
+  check "asserts live changes none of it" "0 of 6 checks failed" \
+    "$(./results/entrypoint_uuid_debug | tr -s ' ')"
+
+  # Check an answer from each sanitized run as well as its silence: `grep -c`
+  # reports 0 diagnostics for a binary that never ran at all.
+  local asan; asan=$(./results/entrypoint_uuid_asan 2>&1 | tr -s ' ')
+  check "the sanitized build reaches the same observations" "0 of 6 checks failed" "$asan"
+  check "ASan and UBSan stay silent throughout" "diagnostics=0" \
+    "diagnostics=$(san_count "$asan")"
+  local asan_debug; asan_debug=$(./results/entrypoint_uuid_asan_debug 2>&1 | tr -s ' ')
+  check "the same holds with the asserts live" "0 of 6 checks failed" "$asan_debug"
+  check "and both sanitizers stay silent there too" "diagnostics=0" \
+    "diagnostics=$(san_count "$asan_debug")"
+}
+
 leg_fix() {
-  echo "[5/5] Fix -- fix/h1-reject-non-hex.patch closes every property above"
+  echo "[6/6] Fix -- fix/h1-reject-non-hex.patch closes every property above"
   mkdir -p results
   local fixed=results/HashingUtils.fixed.cpp
   cp "$MODULE" "$fixed"
   patch -s -p1 --no-backup-if-mismatch --input=fix/h1-reject-non-hex.patch "$fixed" \
     || { echo "  FAIL  patch does not apply"; fail=$((fail + 1)); return; }
 
-  $CXX -std=c++11 -g -O1 -DNDEBUG $INCLUDES harnesses/hex_decode_cases.cpp \
-       "$fixed" $LINK -o results/cases_fixed || return
+  build results/cases_fixed -DNDEBUG harnesses/hex_decode_cases.cpp \
+        "$fixed" $LINK || return
   check "every contract case passes" "0 of 13 contract cases failed" "$(./results/cases_fixed)"
+
+  # The entry point again, against the patched module: the impersonation stops.
+  local e_fixed="harnesses/hex_entrypoint_uuid.cpp $fixed $ENTRYPOINT $LINK"
+  build results/entrypoint_uuid_fixed -DNDEBUG $e_fixed || return
+  local entry; entry=$(./results/entrypoint_uuid_fixed | tr -s ' ')
+  check "the 'K' string stops impersonating a real UUID" \
+    "550e8400-e29b-K1d4-a716-446655440000 -> 00000000-0000-0000-0000-000000000000" "$entry"
+  # Name which observations survive, not just how many: a patch that broke
+  # well-formed decoding would also retire three.
+  check "the patch leaves the well-formed UUID alone" \
+    "PASS the well-formed UUID round-trips" "$entry"
+  check "three of the six observations are retired" "3 of 6 checks failed" "$entry"
+
+  # The cost of the patch at this caller, measured rather than argued: a
+  # rejected string now takes UUID.cpp's existing null-memcpy path. See
+  # README.md "Fix" -- the defect there is U-1's, not H-1's.
+  build results/entrypoint_uuid_fixed_asan -DNDEBUG $SAN $e_fixed || return
+  # One diagnostic, matched on a single line: matching the line and the message
+  # independently would also accept them coming from two different places. The
+  # column is a compiler detail, as ../uuid also treats it.
+  check "a rejected string reaches UUID.cpp's null memcpy" "matches=1" \
+    "matches=$(./results/entrypoint_uuid_fixed_asan 2>&1 |
+               grep -cE 'UUID\.cpp:43:[0-9]+: runtime error: null pointer passed as argument 2')"
 
   command -v esbmc >/dev/null || { echo "  SKIP  esbmc not on PATH"; return; }
   slice "$fixed" results/hexdecode_fixed.cpp
@@ -208,9 +308,11 @@ case "${1:-all}" in
   sanitizer)    leg_sanitizer ;;
   tests)        leg_tests ;;
   reachability) leg_reachability ;;
+  entrypoint)   leg_entrypoint ;;
   fix)          leg_fix ;;
-  all)          leg_esbmc; leg_sanitizer; leg_tests; leg_reachability; leg_fix ;;
-  *)            echo "usage: $0 [all|esbmc|sanitizer|tests|reachability|fix]"; exit 2 ;;
+  all)          leg_esbmc; leg_sanitizer; leg_tests; leg_reachability
+                leg_entrypoint; leg_fix ;;
+  *)            echo "usage: $0 [all|esbmc|sanitizer|tests|reachability|entrypoint|fix]"; exit 2 ;;
 esac
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
