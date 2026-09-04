@@ -38,6 +38,21 @@ and no untrusted caller inside the SDK, so this is a latent hardening bug in
 public API rather than a security report. A patch and the proofs are in
 [verification/hex/](verification/hex/).
 
+Two of the SDK's hand-written stream buffers were examined next, at 1.11.884, and
+carry three defects between them. `SimpleStreamBuf` re-points the end of its get
+area at the put pointer even when that is behind the read position — in
+`underflow` and again in `xsputn` — so an ordinary write / read / `seekp`
+backwards / read sequence hands `setg` an inverted range and the next read
+`memcpy`s a negative length —
+`negative-size-param: (size=-41)` under ASan, and SIGSEGV in a stock release
+build. Both buffers also subtract the offset on end-relative seeks where the
+standard adds it, so `seekg(-3, end)` fails while `seekg(+3, end)` succeeds
+inside the buffer, and both report success from a `pubseekpos` that moves no
+pointer at all. Nothing untrusted reaches any of them and no in-SDK caller
+performs the seeks the last two need, so these are again defects in public API —
+with the difference that the first one is memory corruption. A patch and the
+proofs are in [verification/streambuf/](verification/streambuf/).
+
 A short public write-up of the exercise was
 [posted on 2026-08-13](https://www.linkedin.com/posts/lucas-cordeiro-3156233_formalverification-memorysafety-esbmc-share-7493503595426963457-OZeH/),
 with AWS's permission.

@@ -1,0 +1,115 @@
+--- a/src/aws-cpp-sdk-core/source/utils/stream/SimpleStreamBuf.cpp
++++ b/src/aws-cpp-sdk-core/source/utils/stream/SimpleStreamBuf.cpp
+@@ -72,7 +72,7 @@
+     }
+     else if (dir == std::ios_base::end)
+     {
+-        return seekpos((pptr() - m_buffer) - off, which);
++        return seekpos((pptr() - m_buffer) + off, which);
+     }
+     else if (dir == std::ios_base::cur)
+     {
+@@ -80,7 +80,7 @@
+         { 
+             return seekpos((gptr() - m_buffer) + off, which);
+         }
+-        else
++        else if(which == std::ios_base::out)
+         {
+             return seekpos((pptr() - m_buffer) + off, which);
+         }
+@@ -91,6 +91,11 @@
+ 
+ std::streampos SimpleStreamBuf::seekpos(std::streampos pos, std::ios_base::openmode which)
+ {
++    if ((which & (std::ios_base::in | std::ios_base::out)) == 0)
++    {
++        return pos_type(off_type(-1));
++    }
++
+     size_t maxSeek = pptr() - m_buffer;
+     assert(static_cast<size_t>(pos) <= maxSeek);
+     if (static_cast<size_t>(pos) > maxSeek)
+@@ -98,12 +103,12 @@
+         return pos_type(off_type(-1));
+     }
+ 
+-    if (which == std::ios_base::in)
++    if ((which & std::ios_base::in) != 0)
+     {
+         setg(m_buffer, m_buffer + static_cast<size_t>(pos), pptr());                    
+     }
+ 
+-    if (which == std::ios_base::out)
++    if ((which & std::ios_base::out) != 0)
+     {
+         setp(m_buffer + static_cast<size_t>(pos), epptr());
+     }
+@@ -194,7 +199,10 @@
+             std::memcpy(current_pptr, s + writeCount, copySize);
+             writeCount += copySize;
+             setp(current_pptr + copySize, current_epptr);
+-            setg(m_buffer, gptr(), pptr());
++            if(egptr() < pptr())
++            {
++                setg(m_buffer, gptr(), pptr());
++            }
+         }
+         else if (overflow(std::char_traits< char >::to_int_type(*(s + writeCount))) != std::char_traits<char>::eof())
+         {
+@@ -216,7 +224,7 @@
+ 
+ int SimpleStreamBuf::underflow()
+ {
+-    if(egptr() != pptr())
++    if(egptr() < pptr())
+     {
+         setg(m_buffer, gptr(), pptr());
+     }
+--- a/src/aws-cpp-sdk-core/source/utils/stream/PreallocatedStreamBuf.cpp
++++ b/src/aws-cpp-sdk-core/source/utils/stream/PreallocatedStreamBuf.cpp
+@@ -30,7 +30,7 @@
+                 }
+                 else if (dir == std::ios_base::end)
+                 {
+-                    return seekpos(m_lengthToRead - off, which);
++                    return seekpos(static_cast<off_type>(m_lengthToRead) + off, which);
+                 }
+                 else if (dir == std::ios_base::cur)
+                 {
+@@ -38,7 +38,7 @@
+                     { 
+                         return seekpos((gptr() - reinterpret_cast<char*>(m_underlyingBuffer)) + off, which);
+                     }
+-                    else
++                    else if(which == std::ios_base::out)
+                     {
+                         return seekpos((pptr() - reinterpret_cast<char*>(m_underlyingBuffer)) + off, which);
+                     }
+@@ -49,6 +49,11 @@
+ 
+             PreallocatedStreamBuf::pos_type PreallocatedStreamBuf::seekpos(pos_type pos, std::ios_base::openmode which)
+             {
++                if ((which & (std::ios_base::in | std::ios_base::out)) == 0)
++                {
++                    return pos_type(off_type(-1));
++                }
++
+                 assert(static_cast<size_t>(pos) <= m_lengthToRead);
+                 if (static_cast<size_t>(pos) > m_lengthToRead)
+                 {
+@@ -58,12 +63,12 @@
+                 char* end = reinterpret_cast<char*>(m_underlyingBuffer + m_lengthToRead);
+                 char* begin = reinterpret_cast<char*>(m_underlyingBuffer);
+ 
+-                if (which == std::ios_base::in)
++                if ((which & std::ios_base::in) != 0)
+                 {
+                     setg(begin, begin + static_cast<size_t>(pos), end);
+                 }
+ 
+-                if (which == std::ios_base::out)
++                if ((which & std::ios_base::out) != 0)
+                 {
+                     setp(begin + static_cast<size_t>(pos), end);
+                 }
