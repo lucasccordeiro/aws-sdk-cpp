@@ -5,9 +5,9 @@
 # and the proposed fix. Run from this directory. Exits 0 only if every leg
 # matches.
 #
-#   ./reproduce.sh            all six legs
-#   ./reproduce.sh esbmc      one leg: sanitizer | esbmc | fuzz | delta |
-#                             reachability | fix
+#   ./reproduce.sh            all seven legs
+#   ./reproduce.sh esbmc      one leg: sanitizer | esbmc | ctest | fuzz |
+#                             delta | reachability | fix
 #
 # Needs a C++11 compiler, clang with libFuzzer for the fuzz leg, ESBMC 8.5.0
 # (with Z3 and Bitwuzla) for the proofs, and curl for the reachability leg.
@@ -105,7 +105,7 @@ violated() { # violated <source> [flags...] -- the property name ESBMC reports
 }
 
 leg_sanitizer() {
-  echo "[1/6] Sanitizers -- the pristine accessors on fifteen response bodies"
+  echo "[1/7] Sanitizers -- the pristine accessors on fifteen response bodies"
   mkdir -p results
   build results/witness harnesses/json_number_witness.cpp $MODULES $STUBS $SAN || return
 
@@ -176,7 +176,7 @@ leg_sanitizer() {
 }
 
 leg_esbmc() {
-  echo "[2/6] ESBMC -- the conversion precondition over every double"
+  echo "[2/7] ESBMC -- the conversion precondition over every double"
   command -v esbmc >/dev/null || { skip "esbmc not on PATH"; return; }
   mkdir -p results
 
@@ -202,8 +202,67 @@ EOF
     "$(verdict esbmc results/bare_conversion.c --overflow-check --nan-check --z3)"
 }
 
+# ESBMC's counterexamples, made executable and run against the SDK. The proof
+# leg above says a violating double exists; this one produces specific doubles
+# and shows the pristine accessors mishandling each of them.
+leg_ctest() {
+  echo "[3/7] Counterexamples -- ESBMC's witnesses, replayed on the real accessors"
+  command -v esbmc >/dev/null || { skip "esbmc not on PATH"; return; }
+  mkdir -p results
+  # The generator refuses to overwrite files it did not write, so a stale
+  # directory would silently keep old witnesses.
+  rm -rf results/esbmc-ctest
+
+  local gen; gen=$(esbmc harnesses/json_number_ctest.cpp --std c++11 --z3 \
+    --branch-coverage --generate-ctest-testcase \
+    --ctest-output-dir results/esbmc-ctest 2>&1)
+  check "every region of the conversion is reached" "Branch Coverage: 100%" "$gen"
+
+  local cases; cases=$(find results/esbmc-ctest -name 'test_case_*.cpp' | sort)
+  eq "and each one yields an executable test case" "3 cases" \
+    "$(grep -c '' <<<"$cases") cases"
+
+  # Which witness lands in which region is the solver's choice, so the leg
+  # counts outcomes rather than assuming an order: two of the three regions are
+  # out of range, and exactly one is representable.
+  local tree; tree=$(mktemp -d); SCRATCH+=("$tree")
+  local rel
+  for rel in source/external/cjson/cJSON.cpp source/utils/json/JsonSerializer.cpp \
+             source/utils/Document.cpp source/utils/StringUtils.cpp; do
+    mkdir -p "$tree/$CORE/$(dirname "$rel")"
+    cp "vendor/$rel" "$tree/$CORE/$rel"
+  done
+  ( cd "$tree" && patch -p1 --quiet < "$ROOT/fix/json-number-range-and-print.patch" ) || {
+    printf '  FAIL  the patch does not apply\n'; fail=$((fail + 1)); return; }
+  local patched="$tree/$CORE/source/utils/json/JsonSerializer.cpp \
+$tree/$CORE/source/utils/Document.cpp $tree/$CORE/source/utils/StringUtils.cpp \
+$tree/$CORE/source/external/cjson/cJSON.cpp"
+
+  local n=0 undefined=0 defined=0 fixed_diagnostics=0 infidelity=0 out
+  local tc
+  for tc in $cases; do
+    n=$((n + 1))
+    build "results/replay_$n" harnesses/json_number_replay.cpp "$tc" $MODULES $STUBS $SAN || return
+    out=$(./results/replay_$n 2>&1)
+    [[ "$out" == *INFIDELITY* ]] && infidelity=$((infidelity + 1))
+    if [[ $(san_count "$out") -gt 0 ]]; then undefined=$((undefined + 1)); else defined=$((defined + 1)); fi
+
+    build "results/replay_fixed_$n" harnesses/json_number_replay.cpp "$tc" $patched $STUBS $SAN || return
+    out=$(./results/replay_fixed_$n 2>&1)
+    fixed_diagnostics=$((fixed_diagnostics + $(san_count "$out")))
+  done
+
+  # Every generated double must render to JSON and parse back bit-identical,
+  # or the replay is not running the counterexample it claims to.
+  eq "each witness survives rendering to a response body" "0 lost" "$infidelity lost"
+  eq "the two out-of-range witnesses are undefined on the pristine accessors" \
+    "2 undefined" "$undefined undefined"
+  eq "and the representable one is not"  "1 defined"   "$defined defined"
+  eq "the patch closes all three"        "0 diagnostics" "$fixed_diagnostics diagnostics"
+}
+
 leg_fuzz() {
-  echo "[3/6] Fuzzing -- the parser itself, which is not where the defects are"
+  echo "[4/7] Fuzzing -- the parser itself, which is not where the defects are"
   command -v clang++ >/dev/null || { skip "clang++ not on PATH (libFuzzer)"; return; }
   rm -rf results/corpus && mkdir -p results/corpus
   printf '{"Item":{"id":{"S":"abc"},"n":{"N":"1750000000000"}}}' > results/corpus/ddb.json
@@ -226,7 +285,7 @@ leg_fuzz() {
 }
 
 leg_delta() {
-  echo "[4/6] Delta -- what the fork adds to upstream cJSON $CJSON_VERSION"
+  echo "[5/7] Delta -- what the fork adds to upstream cJSON $CJSON_VERSION"
   local fork=vendor/source/external/cjson/cJSON.cpp
   local ref=reference/cJSON.c
 
@@ -264,7 +323,7 @@ leg_delta() {
 }
 
 leg_reachability() {
-  echo "[5/6] Reachability -- the vendored bytes, and who reads these numbers"
+  echo "[6/7] Reachability -- the vendored bytes, and who reads these numbers"
   local tmp; tmp=$(mktemp -d); SCRATCH+=("$tmp")
   curl -fsS "$RAW/$CORE/source/client/AWSErrorMarshaller.cpp" -o "$tmp/Marshaller.cpp" 2>/dev/null \
     || { skip "no network"; rm -rf "$tmp"; return; }
@@ -311,7 +370,7 @@ leg_reachability() {
 }
 
 leg_fix() {
-  echo "[6/6] Fix -- the same bodies, patched"
+  echo "[7/7] Fix -- the same bodies, patched"
   mkdir -p results
   local tree; tree=$(mktemp -d); SCRATCH+=("$tree")
   local rel
@@ -395,12 +454,14 @@ leg_fix() {
 case "${1:-all}" in
   sanitizer)    leg_sanitizer ;;
   esbmc)        leg_esbmc ;;
+  ctest)        leg_ctest ;;
   fuzz)         leg_fuzz ;;
   delta)        leg_delta ;;
   reachability) leg_reachability ;;
   fix)          leg_fix ;;
-  all)          leg_sanitizer; leg_esbmc; leg_fuzz; leg_delta; leg_reachability; leg_fix ;;
-  *)            echo "usage: $0 [all|sanitizer|esbmc|fuzz|delta|reachability|fix]"; exit 2 ;;
+  all)          leg_sanitizer; leg_esbmc; leg_ctest; leg_fuzz; leg_delta
+                leg_reachability; leg_fix ;;
+  *)            echo "usage: $0 [all|sanitizer|esbmc|ctest|fuzz|delta|reachability|fix]"; exit 2 ;;
 esac
 
 printf '\n%d passed, %d failed' "$pass" "$fail"

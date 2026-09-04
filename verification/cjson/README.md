@@ -106,6 +106,8 @@ reference/      upstream cJSON v1.7.19, for the delta leg. Third-party, and the
 harnesses/      json_number_witness.cpp   fifteen response bodies through
                                           JsonValue and through Document
                 json_number_esbmc.cpp     the conversion, over a symbolic double
+                json_number_ctest.cpp     input for ESBMC's test-case generation
+                json_number_replay.cpp    runs a generated witness on the SDK
                 cjson_parse_fuzz.cpp      libFuzzer entry point for the parser
 stubs/          verification-only substitutes (memory system, logging, the two
                 CRT headers Array.h pulls in), each documenting what it replaces
@@ -116,8 +118,8 @@ results/        build outputs and logs (regenerated; safe to delete)
 ## Running
 
 ```sh
-./reproduce.sh              # 70 checks, ~30 s
-./reproduce.sh sanitizer    # or one leg: sanitizer, esbmc, fuzz, delta,
+./reproduce.sh              # 76 checks, ~35 s
+./reproduce.sh sanitizer    # or one leg: sanitizer, esbmc, ctest, fuzz, delta,
                             # reachability, fix
 ```
 
@@ -130,6 +132,17 @@ that cannot run has not agreed with anything, so it must not read as a pass.
   `-fsanitize=undefined` a GCC build reports nothing for J-2 and the run looks
   clean. `reproduce.sh` names the check explicitly; clang enables it as part of
   `undefined`.
+* **ESBMC's counterexamples are executed, not just reported.**
+  `./reproduce.sh ctest` runs `--branch-coverage --generate-ctest-testcase` over
+  `json_number_ctest.cpp`, which splits the conversion's input into the three
+  regions its precondition distinguishes. The solver returns one concrete double
+  per region — on our runs 2^63, a representable value, and about -2^64 — as
+  compilable `__VERIFIER_nondet_double()` bodies. `json_number_replay.cpp` links
+  each one against the **real** accessors, renders it as a response body, and
+  reads it back, so the witness is executed on the SDK rather than on the model.
+  Two of the three are undefined on the pristine sources and all three are clean
+  under the patch. Which witness lands in which region is the solver's choice, so
+  the leg counts outcomes rather than assuming an order.
 * **ESBMC has no check for this conversion.** `--overflow-check --nan-check`
   reports `VERIFICATION SUCCESSFUL` on a bare `(long long)1e300`, so
   `harnesses/json_number_esbmc.cpp` states [conv.fpint]'s precondition itself

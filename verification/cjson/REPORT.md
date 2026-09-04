@@ -284,6 +284,7 @@ paragraph gets deleted. Reported upstream separately.
 | `-D FIXED` | below the range, saturates low | SUCCESSFUL — Z3 and Bitwuzla |
 | `-D FIXED` | above the range, saturates high | SUCCESSFUL — Z3 and Bitwuzla |
 | `-D FIXED -D EQUIVALENCE` | the patch's own `ToInt64Saturating` agrees with the model above, for every non-NaN double | SUCCESSFUL — Z3 and Bitwuzla |
+| `--branch-coverage --generate-ctest-testcase` | one executable witness per region of the conversion | 100% branch coverage, 3 test cases |
 
 ### Fidelity of the model
 
@@ -304,6 +305,46 @@ actually ships does not, because nothing feeds the patch to ESBMC. What catches 
 mutation of the shipped helper is the native fix leg, which builds the patched
 tree and checks its answers. `LiteralToInt64` is likewise covered only by the
 native witness.
+
+### Executable counterexamples
+
+A `VERIFICATION FAILED` verdict says a violating double exists; it does not hand
+anyone a test they can run. ESBMC's test-case generation does
+([docs](https://esbmc.github.io/docs/c-cpp/ctest-gen/)):
+
+```sh
+esbmc harnesses/json_number_ctest.cpp --std c++11 --branch-coverage \
+      --generate-ctest-testcase --ctest-output-dir results/esbmc-ctest
+```
+
+`json_number_ctest.cpp` splits the conversion's input into the three regions its
+precondition distinguishes, so covering every branch forces the solver to name a
+concrete double in each. It reports `Branch Coverage: 100%` and writes
+`test_case_N.cpp`, each a compilable `__VERIFIER_nondet_double()` returning one
+witness. On our runs:
+
+| Witness | Region | On the pristine accessors |
+|---|---|---|
+| `9.2233720368547759e+18` (2^63) | above the range | undefined — `:502`, `:515`, `:641`, `:656`, and `Document.cpp:519` |
+| `1.0261342003245943e-289` | representable | defined; reads back as `0` |
+| `-1.8446744073709555e+19` (≈ −2^64) | below the range | undefined — the same sites |
+
+The generated `CMakeLists.txt` would rebuild the harness with those values, which
+only re-runs the model. `harnesses/json_number_replay.cpp` links the generated
+`__VERIFIER_nondet_double()` against the **real** `JsonSerializer.cpp` and
+`Document.cpp` instead, renders the double as `{"n":%.17g}` and reads it back the
+way a generated deserializer does — so the counterexample is executed against the
+SDK. The driver checks that the rendered text parses back bit-identical before
+trusting the replay; rendering with `%.6g` instead makes that check fire.
+
+Under the patch all three are clean and saturate correctly. Which witness lands
+in which region is the solver's choice, so the leg counts outcomes — two
+undefined, one defined — rather than assuming an order.
+
+**Scope.** This witnesses J-2, whose precondition is a property of the *value*.
+J-1 and J-3 are properties of the literal *text* — its length, and whether it
+carries an exponent — which a double-valued model cannot express; those are
+covered by the native witness instead.
 
 ## Fuzzing — where the defects are not
 
@@ -507,9 +548,9 @@ printer error, not J-1 itself.
 ## Reproducing
 
 ```sh
-./reproduce.sh              # 70 checks, ~30 s
-./reproduce.sh sanitizer    # or one leg at a time: sanitizer, esbmc, fuzz,
-                            # delta, reachability, fix
+./reproduce.sh              # 76 checks, ~35 s
+./reproduce.sh sanitizer    # or one leg at a time: sanitizer, esbmc, ctest,
+                            # fuzz, delta, reachability, fix
 ```
 
 Everything the sanitizers, ESBMC and libFuzzer analyse is byte-for-byte upstream
