@@ -151,7 +151,7 @@ results/        build outputs and logs (regenerated; safe to delete)
 ## Running
 
 ```sh
-./reproduce.sh              # 107 checks, ~3 min
+./reproduce.sh              # 107 checks, ~5 min
 ./reproduce.sh esbmc        # or one leg, in the order they run: esbmc, ctest,
                             # sanitizer, fuzz, delta, reachability, fix
 ```

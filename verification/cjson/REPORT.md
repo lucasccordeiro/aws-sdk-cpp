@@ -630,7 +630,7 @@ printer error, not J-1 itself.
 ## Reproducing
 
 ```sh
-./reproduce.sh              # 107 checks, ~3 min
+./reproduce.sh              # 107 checks, ~5 min
 ./reproduce.sh esbmc        # or one leg at a time, in the order they run:
                             # esbmc, ctest, sanitizer, fuzz, delta,
                             # reachability, fix
