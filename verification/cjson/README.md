@@ -37,11 +37,11 @@ whole document when it does not fit. The wrapper does not check the result:
 ```
 
 ```
-$ ./results/witness 5
-26-digits  {"n":99999999999999999999999999}  isInteger=1 isFloat=0 AsInt64=9223372036854775807 AsDouble=1e+26
+$ ./results/witness 5                        # paths and columns trimmed below
+26-digits  {"n":99999999999999999999999999}  isInteger=1 isFloat=0 AsInt64=9223372036854775807 ...
 terminate called after throwing an instance of 'std::logic_error'
   what():  basic_string: construction from null is not valid
-Aborted (core dumped)                                     # exit 134
+Aborted (core dumped)                        # exit 134
 ```
 
 25 characters print normally; 26 abort. ASan and UBSan stay silent throughout —
@@ -57,11 +57,14 @@ undefined when the value is not representable, and `valuedouble` is whatever
 
 ```
 $ ./results/witness 3                                    # GCC, ASan + UBSan
+JsonSerializer.cpp:502: runtime error: 1.5e+300 is outside the range of representable values of type 'long int'
 JsonSerializer.cpp:515: runtime error: 1.5e+300 is outside the range of representable values of type 'long int'
 JsonSerializer.cpp:656: runtime error: 1.5e+300 is outside the range of representable values of type 'long long int'
 JsonSerializer.cpp:641: runtime error: 1.5e+300 is outside the range of representable values of type 'long long int'
-exp-dot  {"n":1.5e300}  isInteger=0 isFloat=1 AsInt64=-9223372036854775808 AsDouble=1.5e+300
+exp-dot  {"n":1.5e300}  isInteger=0 isFloat=1 AsInt64=-9223372036854775808 GetInt64=-9223372036854775808 ...
 ```
+
+`:502` is `GetInt64`, which is the accessor generated deserializers call.
 
 This one needs no logging and no application involvement: generated
 deserializers read every `int64` model field through `GetInt64`
@@ -73,11 +76,16 @@ first character that cannot continue a decimal integer. A literal is kept for
 exponent forms too, so:
 
 ```
+$ ./results/witness 6
+exp-in-range  {"n":5e9}    isInteger=0 isFloat=1 AsInt64=5 GetInt64=5 AsDouble=5e+09
 $ ./results/witness 2
-exp-no-dot  {"n":1e300}  isInteger=0 isFloat=1 AsInt64=1 AsDouble=1e+300
+exp-no-dot    {"n":1e300}  isInteger=0 isFloat=1 AsInt64=1 GetInt64=1 AsDouble=1e+300
 ```
 
-The service sent 10³⁰⁰ and the application reads **1**.
+Five billion is exactly representable as an `int64`, the SDK has the literal in
+hand, and the application reads **5**. `parse_number` keeps a literal for
+anything outside **`int`**'s range, so this is not confined to numbers too large
+to represent.
 
 ## Layout
 
@@ -101,7 +109,7 @@ results/        build outputs and logs (regenerated; safe to delete)
 ## Running
 
 ```sh
-./reproduce.sh              # 46 checks, ~25 s
+./reproduce.sh              # 55 checks, ~25 s
 ./reproduce.sh sanitizer    # or one leg: sanitizer, esbmc, fuzz, delta,
                             # reachability, fix
 ```
