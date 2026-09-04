@@ -30,19 +30,20 @@
      else if (isnan(d) || isinf(d))
 --- a/src/aws-cpp-sdk-core/source/utils/json/JsonSerializer.cpp
 +++ b/src/aws-cpp-sdk-core/source/utils/json/JsonSerializer.cpp
-@@ -10,6 +10,54 @@
+@@ -10,6 +10,55 @@
  #include <aws/core/utils/memory/stl/AWSStringStream.h>
  #include <aws/core/utils/StringUtils.h>
  #include <aws/core/utils/Document.h>
-+#include <cerrno>
++#include <aws/core/utils/logging/LogMacros.h>
 +#include <cstdlib>
 +#include <limits>
 +
 +namespace
 +{
-+    /* [conv.fpint]/1 leaves a floating-point to integer conversion undefined when
-+     * the truncated value is not representable. cJSON saturates valueint for the
-+     * same reason ("use saturation in case of overflow", cJSON.cpp). */
++    /* [conv.fpint]/1 leaves a floating-point to integer conversion undefined
++     * when the truncated value is not representable.
++     * cJSON saturates valueint for the same reason ("use saturation in case of
++     * overflow", cJSON.cpp). */
 +    const double LLONG_MIN_AS_DOUBLE = -9223372036854775808.0;
 +    const double LLONG_MAX_PLUS_ONE = 9223372036854775808.0;
 +
@@ -68,14 +69,14 @@
 +        return static_cast<int64_t>(value);
 +    }
 +
-+    /* An exponent form such as 1e300 is kept as a literal too, and strtoll stops
-+     * at the 'e'; fall back to the number itself rather than return the mantissa. */
++    /* strtoll saturates an out-of-range literal itself (C 7.22.1.4p8), so its
++     * answer stands whenever it consumed the whole literal. It stops at the 'e'
++     * of an exponent form, and 5e9 must not read back as 5. */
 +    int64_t LiteralToInt64(const char* literal, double valuedouble)
 +    {
 +        char* end = nullptr;
-+        errno = 0;
 +        const long long parsed = std::strtoll(literal, &end, 10);
-+        if (end != nullptr && *end == '\0' && errno != ERANGE)
++        if (*end == '\0')
 +        {
 +            return parsed;
 +        }
@@ -85,7 +86,7 @@
  
  using namespace Aws::Utils;
  using namespace Aws::Utils::Json;
-@@ -495,11 +543,11 @@
+@@ -495,11 +544,11 @@
      assert(item);
      if (item->valuestring)
      {
@@ -99,7 +100,7 @@
      }
  }
  
-@@ -508,11 +556,11 @@
+@@ -508,11 +557,11 @@
      assert(cJSON_AS4CPP_IsNumber(m_value));
      if (m_value->valuestring)
      {
@@ -113,7 +114,7 @@
      }
  }
  
-@@ -638,7 +686,8 @@
+@@ -638,7 +687,8 @@
          Aws::String valueString = m_value->valuestring;
          return std::all_of(valueString.begin(), valueString.end(), [](unsigned char c){ return ::isdigit(c) || c == '+' || c == '-'; });
      }
@@ -123,7 +124,7 @@
  }
  
  bool JsonView::IsFloatingPointType() const
-@@ -653,7 +702,8 @@
+@@ -653,7 +703,8 @@
          Aws::String valueString = m_value->valuestring;
          return std::any_of(valueString.begin(), valueString.end(), [](unsigned char c){ return !::isdigit(c) && c != '+' && c != '-'; });
      }
@@ -133,41 +134,48 @@
  }
  
  bool JsonView::IsListType() const
-@@ -678,6 +728,10 @@
+@@ -678,6 +729,14 @@
      }
  
      auto temp = cJSON_AS4CPP_PrintUnformatted(m_value);
 +    if (!temp)
 +    {
-+        return treatAsObject ? Aws::String("{}") : Aws::String();
++        /* Empty rather than "{}": this is the body of every generated
++         * SerializePayload, and a document that failed to print must not read
++         * as one the caller left empty. */
++        AWS_LOGSTREAM_ERROR("JsonView", "Failed to print JSON document");
++        return {};
 +    }
      Aws::String out(temp);
      cJSON_AS4CPP_free(temp);
      return out;
-@@ -695,6 +749,10 @@
+@@ -695,6 +754,11 @@
      }
  
      auto temp = cJSON_AS4CPP_Print(m_value);
 +    if (!temp)
 +    {
-+        return treatAsObject ? Aws::String("{\n}\n") : Aws::String();
++        AWS_LOGSTREAM_ERROR("JsonView", "Failed to print JSON document");
++        return {};
 +    }
      Aws::String out(temp);
      cJSON_AS4CPP_free(temp);
      return out;
 --- a/src/aws-cpp-sdk-core/source/utils/Document.cpp
 +++ b/src/aws-cpp-sdk-core/source/utils/Document.cpp
-@@ -10,6 +10,50 @@
+@@ -10,6 +10,54 @@
  #include <aws/core/utils/memory/stl/AWSStringStream.h>
  #include <aws/core/utils/StringUtils.h>
  #include <aws/core/utils/json/JsonSerializer.h>
-+#include <cerrno>
++#include <aws/core/utils/logging/LogMacros.h>
 +#include <cstdlib>
 +#include <limits>
 +
 +namespace
 +{
-+    /* Same conversion precondition JsonSerializer.cpp guards: [conv.fpint]/1. */
++    /* Same conversion precondition JsonSerializer.cpp guards, [conv.fpint]/1;
++     * cJSON saturates valueint for the same reason ("use saturation in case of
++     * overflow", cJSON.cpp). */
 +    const double LLONG_MIN_AS_DOUBLE = -9223372036854775808.0;
 +    const double LLONG_MAX_PLUS_ONE = 9223372036854775808.0;
 +
@@ -193,12 +201,14 @@
 +        return static_cast<int64_t>(value);
 +    }
 +
++    /* strtoll saturates an out-of-range literal itself (C 7.22.1.4p8), so its
++     * answer stands whenever it consumed the whole literal. It stops at the 'e'
++     * of an exponent form, and 5e9 must not read back as 5. */
 +    int64_t LiteralToInt64(const char* literal, double valuedouble)
 +    {
 +        char* end = nullptr;
-+        errno = 0;
 +        const long long parsed = std::strtoll(literal, &end, 10);
-+        if (end != nullptr && *end == '\0' && errno != ERANGE)
++        if (*end == '\0')
 +        {
 +            return parsed;
 +        }
@@ -208,7 +218,7 @@
  
  using namespace Aws::Utils;
  
-@@ -489,7 +533,8 @@
+@@ -489,7 +537,8 @@
          Aws::String valueString = m_json->valuestring;
          return std::all_of(valueString.begin(), valueString.end(), [](unsigned char c){ return ::isdigit(c) || c == '+' || c == '-'; });
      }
@@ -218,7 +228,7 @@
  }
  
  int64_t DocumentView::GetInt64(const Aws::String& key) const
-@@ -499,11 +544,11 @@
+@@ -499,11 +548,11 @@
      assert(item);
      if (item->valuestring)
      {
@@ -232,7 +242,7 @@
      }
  }
  
-@@ -512,11 +557,11 @@
+@@ -512,11 +561,11 @@
      assert(cJSON_AS4CPP_IsNumber(m_json));
      if (m_json->valuestring)
      {
@@ -246,7 +256,7 @@
      }
  }
  
-@@ -546,7 +591,8 @@
+@@ -546,7 +595,8 @@
          Aws::String valueString = m_json->valuestring;
          return std::any_of(valueString.begin(), valueString.end(), [](unsigned char c){ return !::isdigit(c) && c != '+' && c != '-'; });
      }
@@ -256,46 +266,48 @@
  }
  
  Array<DocumentView> DocumentView::GetArray(const Aws::String& key) const
-@@ -653,6 +699,10 @@
+@@ -653,6 +703,11 @@
      }
  
      auto temp = cJSON_AS4CPP_PrintUnformatted(m_json);
 +    if (!temp)
 +    {
-+        return "null";
++        AWS_LOGSTREAM_ERROR("DocumentView", "Failed to print JSON document");
++        return {};
 +    }
      Aws::String out(temp);
      cJSON_AS4CPP_free(temp);
      return out;
-@@ -666,6 +716,10 @@
+@@ -666,6 +721,11 @@
      }
  
      auto temp = cJSON_AS4CPP_Print(m_json);
 +    if (!temp)
 +    {
-+        return "null";
++        AWS_LOGSTREAM_ERROR("DocumentView", "Failed to print JSON document");
++        return {};
 +    }
      Aws::String out(temp);
      cJSON_AS4CPP_free(temp);
      return out;
 --- a/src/aws-cpp-sdk-core/source/utils/StringUtils.cpp
 +++ b/src/aws-cpp-sdk-core/source/utils/StringUtils.cpp
-@@ -341,10 +341,12 @@
+@@ -341,11 +341,9 @@
          return 0;
      }
  
+-#ifdef __ANDROID__
+-    return atoll(source);
+-#else
+-    return std::atoll(source);
+-#endif // __ANDROID__
 +    /* atoll is undefined if the value is not representable (C 7.22.1.2p3);
 +       strtoll saturates. Reached with a JSON literal via JsonView::AsInt64. */
- #ifdef __ANDROID__
--    return atoll(source);
-+    return strtoll(source, nullptr, 10);
- #else
--    return std::atoll(source);
 +    return std::strtoll(source, nullptr, 10);
- #endif // __ANDROID__
  }
  
-@@ -356,7 +358,7 @@
+ 
+@@ -356,7 +354,7 @@
          return 0;
      }
  
