@@ -2,7 +2,8 @@
  * Verification-only substitute for the logger registry in
  * source/utils/logging/AWSLogging.cpp. A null log system is the state of a
  * process that never called Aws::Utils::Logging::InitializeAWSLogging, which is
- * what AWS_LOGSTREAM_* macros test for before formatting (LogMacros.h:55).
+ * what AWS_LOGSTREAM_* macros test for before formatting (LogMacros.h:71, the
+ * guard inside AWS_LOGSTREAM; AWS_LOG has its own at :55).
  *
  * That guard is J-1's condition in miniature: the marshaller's WriteReadable
  * call sits inside AWS_LOGSTREAM_TRACE, so a null log system is also the state

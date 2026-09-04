@@ -14,6 +14,11 @@
 
 set -u
 
+# Every path below is relative to this directory. Run from elsewhere and the
+# reads fail one by one, ending in a "no network" skip that is not the problem.
+cd "$(dirname "$0")" || exit 2
+ROOT=$PWD
+
 UPSTREAM_VERSION=$(cat vendor/UPSTREAM_VERSION)
 UPSTREAM_COMMIT=$(cat vendor/UPSTREAM_COMMIT)
 CJSON_VERSION=$(cat reference/UPSTREAM_CJSON_VERSION)
@@ -40,6 +45,11 @@ vendor/source/utils/StringUtils.cpp vendor/source/external/cjson/cJSON.cpp"
 SAN="-fsanitize=address,undefined,float-cast-overflow -fno-omit-frame-pointer"
 
 pass=0 fail=0 skip=0
+# The legs delete their own scratch trees on every exit path; this is what
+# catches an interrupt in between.
+SCRATCH=()
+cleanup() { [[ ${#SCRATCH[@]} -gt 0 ]] && rm -rf "${SCRATCH[@]}"; }
+trap cleanup EXIT INT TERM
 # A leg that cannot run has not matched, so it must not leave the run exiting 0.
 skip() { printf '  SKIP  %s\n' "$1"; skip=$((skip + 1)); }
 check() { # check <name> <expected-substring> <actual>
@@ -195,7 +205,7 @@ EOF
 leg_fuzz() {
   echo "[3/6] Fuzzing -- the parser itself, which is not where the defects are"
   command -v clang++ >/dev/null || { skip "clang++ not on PATH (libFuzzer)"; return; }
-  mkdir -p results/corpus
+  rm -rf results/corpus && mkdir -p results/corpus
   printf '{"Item":{"id":{"S":"abc"},"n":{"N":"1750000000000"}}}' > results/corpus/ddb.json
   printf '{"__type":"ValidationException","message":"bad \\u00e9 input"}' > results/corpus/err.json
   printf '{"ContentLength":3221225472,"big":123456789012345678901234567890}' > results/corpus/big.json
@@ -212,7 +222,7 @@ leg_fuzz() {
     -artifact_prefix=results/ results/corpus 2>&1)
   check "parse, print and re-parse survive 60k mutations" "Done 60000 runs" "$out"
   check "with no crash to report"                         "artifacts=0" \
-    "artifacts=$(find results -maxdepth 1 -name 'crash-*' -o -maxdepth 1 -name 'oom-*' | wc -l)"
+    "artifacts=$(find results -maxdepth 1 \( -name 'crash-*' -o -name 'oom-*' \) | wc -l)"
 }
 
 leg_delta() {
@@ -228,7 +238,7 @@ leg_delta() {
   # "upstream has no literal" and pass.
   local upstream_parse; upstream_parse=$(sed -n '/static cJSON_bool parse_number/,/^}/p' "$ref")
   eq "upstream keeps no literal at all" "102 lines, 0 hits" \
-    "$(wc -l <<<"$upstream_parse") lines, $(grep -c 'valuestring' <<<"$upstream_parse") hits"
+    "$(grep -c '' <<<"$upstream_parse") lines, $(grep -c 'valuestring' <<<"$upstream_parse") hits"
   check "and the fork prints through it"         "if (item->valuestring)" \
     "$(sed -n '/static cJSON_AS4CPP_bool print_number/,/^}/p' "$fork" | grep -m1 'item->valuestring')"
 
@@ -255,7 +265,7 @@ leg_delta() {
 
 leg_reachability() {
   echo "[5/6] Reachability -- the vendored bytes, and who reads these numbers"
-  local tmp; tmp=$(mktemp -d)
+  local tmp; tmp=$(mktemp -d); SCRATCH+=("$tmp")
   curl -fsS "$RAW/$CORE/source/client/AWSErrorMarshaller.cpp" -o "$tmp/Marshaller.cpp" 2>/dev/null \
     || { skip "no network"; rm -rf "$tmp"; return; }
   curl -fsS "$RAW/generated/src/aws-cpp-sdk-lambda/source/model/FunctionConfiguration.cpp" \
@@ -303,14 +313,14 @@ leg_reachability() {
 leg_fix() {
   echo "[6/6] Fix -- the same bodies, patched"
   mkdir -p results
-  local tree; tree=$(mktemp -d)
+  local tree; tree=$(mktemp -d); SCRATCH+=("$tree")
   local rel
   for rel in source/external/cjson/cJSON.cpp source/utils/json/JsonSerializer.cpp \
              source/utils/Document.cpp source/utils/StringUtils.cpp; do
     mkdir -p "$tree/$CORE/$(dirname "$rel")"
     cp "vendor/$rel" "$tree/$CORE/$rel"
   done
-  ( cd "$tree" && patch -p1 --quiet < "$OLDPWD/fix/json-number-range-and-print.patch" ) || {
+  ( cd "$tree" && patch -p1 --quiet < "$ROOT/fix/json-number-range-and-print.patch" ) || {
     printf '  FAIL  the patch does not apply to %s\n' "$UPSTREAM_VERSION"; fail=$((fail + 1))
     rm -rf "$tree"; return; }
   eq "the patch changes all four modules" "4 changed" \
