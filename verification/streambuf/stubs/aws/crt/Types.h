@@ -1,7 +1,8 @@
 /**
  * Verification-only stub for <aws/crt/Types.h>, standing in for the
- * aws-crt-cpp submodule. HexDecode reaches none of what follows; the names
- * exist so the translation unit compiles and links.
+ * aws-crt-cpp submodule. Nothing under analysis here reaches any of what
+ * follows; the names exist so the translation unit compiles and links.
+ * Array.h (vendored) is the only header in this tree that includes it.
  *
  * Layouts mirror aws-c-common's `struct aws_byte_buf` / `aws_byte_cursor`.
  */
@@ -21,8 +22,8 @@ namespace Aws
     namespace Crt
     {
         /* Array.h includes this header for ByteBuf, used only by CryptoBuffer's
-         * CRT move-interop ctor and assignment (Array.h:266-291). The hex
-         * harnesses touch ByteBuffer, never CryptoBuffer. */
+         * CRT move-interop ctor and assignment (Array.h:266-291). The stream
+         * buffers touch neither; PreallocatedStreamBuf takes a raw uint8_t*. */
         struct ByteBuf
         {
             struct aws_allocator *allocator;
@@ -43,8 +44,8 @@ namespace Aws
             return cursor;
         }
 
-        /* Base64.cpp -- vendored pristine -- has been a pass-through to these
-         * four since 1.11.862, when AWS moved the codec out of the SDK. */
+        /* Declared only because Array.h's include of this header expects the
+         * namespace to exist. No source in this tree calls them. */
         inline std::string Base64Encode(ByteCursor) { return std::string(); }
         inline std::vector<unsigned char> Base64Decode(ByteCursor) { return std::vector<unsigned char>(); }
         inline std::size_t Base64EncodedLength(ByteCursor) { return 0; }

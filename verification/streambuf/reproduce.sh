@@ -167,14 +167,17 @@ leg_esbmc() {
     "an end-relative seek inside the sequence did not land at length + off" \
     "$(violations $P -D NDEBUG -D HARNESS_MODE_SEEK_BACK)"
   check "the in|out row broke the positioning property" \
-    "a seek that reported success positioned neither sequence" \
+    "a seek that reported success did not position both sequences" \
     "$(violations $P -D NDEBUG -D HARNESS_MODE_SEEK_BOTH)"
-  check "the underflow row broke setg's precondition" \
+  check "the underflow row broke the get-area property" \
     "underflow left the get area with gptr past egptr" \
     "$(violations $P -D NDEBUG -D HARNESS_MODE_GET_AREA)"
   check "the upload buffer broke the same landing property" \
     "an end-relative seek outside the sequence reported success" \
     "$(violations $P -D NDEBUG -D HARNESS_MODE_PREALLOC_END)"
+  check "and the upload buffer's in|out row broke the positioning one" \
+    "a seek that reported success did not position both sequences" \
+    "$(violations $P -D NDEBUG -D HARNESS_MODE_PREALLOC_BOTH)"
   # And the debug row, which stops earlier than any of them: at the module's own
   # assert rather than at a property of ours.
   check "the abort is SimpleStreamBuf's own assert" \
@@ -192,12 +195,15 @@ leg_sanitizer() {
 
   # The control: the same sequence on the buffer SimpleStreamBuf replaces.
   local reference; reference=$(./results/witness_ndebug reference 2>&1)
-  check "std::stringbuf reads the written bytes and stops" "on the same sequence: gcount=10, no diagnostic" "$reference"
-  check "and reads nothing after the write, cleanly"       "ending in a write: gcount=0, no diagnostic" "$reference"
+  check "std::stringbuf reads the written bytes and stops" "on the same sequence: gcount=10" "$reference"
+  check "and reads nothing after the write"                "ending in a write: gcount=0" "$reference"
+  # The control's cleanliness is the point of it, so it is counted from the same
+  # run rather than printed by the program under observation.
+  check "with both sanitizers silent on the control"       "diagnostics=0" "diagnostics=$(san_count "$reference")"
 
   local invariant; invariant=$(./results/witness_ndebug invariant 2>&1)
   check "underflow leaves gptr past egptr"        "gptr=51 egptr=10" "$invariant"
-  check "which is what setg forbids"              "precondition [streambuf.get.area]/5 holds: no" "$invariant"
+  check "which is a get area no read can use"     "get area well-formed, gptr <= egptr: no" "$invariant"
   check "a one-byte read returns unwritten heap"  "which the application never wrote" \
     "$(./results/witness_ndebug stale 2>&1)"
 
@@ -320,7 +326,7 @@ leg_fix() {
   build results/witness_fixed -DNDEBUG $SAN harnesses/streambuf_witness.cpp \
         "$simple_fixed" "$prealloc_fixed" $LINK || return
   local invariant; invariant=$(./results/witness_fixed invariant 2>&1)
-  check "underflow keeps setg's precondition" "precondition [streambuf.get.area]/5 holds: yes" "$invariant"
+  check "underflow keeps the get area well-formed" "get area well-formed, gptr <= egptr: yes" "$invariant"
   check "a read past the written data stops"  "reported EOF" \
     "$(./results/witness_fixed stale 2>&1)"
   # The same read the pristine build died on, and the same answer the reference
@@ -332,7 +338,7 @@ leg_fix() {
   # Both sites, not just underflow's: the write path has its own hunk, and its
   # answer is std::stringbuf's -- nothing left to read, and no diagnostic.
   local write; write=$(./results/witness_fixed write 2>&1)
-  check "the write path keeps the precondition too" "precondition [streambuf.get.area]/5 holds: yes" "$write"
+  check "the write path keeps it well-formed too" "get area well-formed, gptr <= egptr: yes" "$write"
   check "and reads nothing after it, as the reference does" "gcount=0" "$write"
   check "with both sanitizers silent there too" "diagnostics=0" "diagnostics=$(san_count "$write")"
 
@@ -358,6 +364,11 @@ leg_fix() {
   # under T-2 rather than fixed here. See REPORT.md "What the patch does not do".
   both_solvers "an out-of-range seek still aborts a debug build" "VERIFICATION FAILED" \
     results/streambuf_fixed.cpp
+  # The only FAILED row in this leg, so name the claim it broke: it must be the
+  # module's own assert and not a property the patch was supposed to close.
+  check "and it is the module's own assert that stops it" \
+    "assertion static_cast<size_t>(pos) <= maxSeek" \
+    "$(violations results/streambuf_fixed.cpp)"
 }
 
 case "${1:-all}" in

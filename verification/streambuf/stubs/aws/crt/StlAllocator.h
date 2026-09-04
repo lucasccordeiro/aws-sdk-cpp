@@ -3,7 +3,7 @@
  *
  * The real header lives in the aws-crt-cpp submodule (crt/aws-crt-cpp), which
  * we deliberately do not check out: it drags in the whole C99 CRT stack and is
- * irrelevant to the codec logic under analysis.
+ * irrelevant to the seek and get-area logic under analysis.
  *
  * AWSAllocator.h includes this header unconditionally, but only *references*
  * Aws::Crt::StlAllocator inside `#ifdef USE_AWS_MEMORY_MANAGEMENT`. We build

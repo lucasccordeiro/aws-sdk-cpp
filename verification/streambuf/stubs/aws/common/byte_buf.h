@@ -1,9 +1,8 @@
 /**
  * Verification-only substitute for aws-c-common's aws/common/byte_buf.h.
  *
- * StringUtils.h names exactly one type from the CRT -- aws_byte_cursor, in the
- * inline FromByteCursor helper (StringUtils.h:232), which HexDecode does not
- * call. The layout below is the upstream one; nothing here is executed.
+ * Included only by the aws/crt/Types.h stub beside it, which Array.h pulls in
+ * for ByteBuf. The layout below is the upstream one; nothing here is executed.
  */
 #pragma once
 
