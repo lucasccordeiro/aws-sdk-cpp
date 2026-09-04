@@ -8,7 +8,7 @@
  *   JsonSerializer.cpp:498,511  GetInt64 and AsInt64 return its answer unchanged
  *   Document.cpp:502,515        the same two accessors again
  *
- * Those four are the `if (valuestring)` arm. The `else` arm two lines below each
+ * Those four are the `if (valuestring)` arm. The `else` arm four lines below each
  * -- :502,515 and :506,519 -- is J-2's unguarded conversion, a different defect.
  *
  * The function under analysis is the one the SDK calls. std::atoll is not

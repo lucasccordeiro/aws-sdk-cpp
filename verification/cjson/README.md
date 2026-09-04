@@ -12,14 +12,16 @@ parse / print / re-parse under ASan and UBSan found nothing, and normalising the
 v1.7.19 with no memory-safety drift. What upstream's fuzzing cannot see is the
 one feature AWS added on top, and the C++ layer above it.
 
-**ESBMC finds all three, and the sanitizers only confirm what it names.** Each
+**ESBMC finds all three, from symbolic input alone.** Each
 defect is stated as a property over symbolic input — the literal's length, the
 double, the mantissa and the exponent are free variables, and no harness names a
 triggering value. ESBMC refutes each property. A second harness per defect splits
 the same input into the regions the defect's condition distinguishes, so ESBMC's
 test-case generator has to name a concrete value in each; those values compile
 into tests that run against the pristine SDK under ASan and UBSan. The numbers
-below are the solver's, not ours:
+below are the solver's, not ours. (The `sanitizer` leg then goes further than any
+of this: its fifteen bodies are chosen by hand and probe more of each defect's
+behaviour than a counterexample needs to.)
 
 | Defect | Property, over symbolic input | Value the generator named | On the pristine SDK |
 |---|---|---|---|
@@ -149,7 +151,7 @@ results/        build outputs and logs (regenerated; safe to delete)
 ## Running
 
 ```sh
-./reproduce.sh              # 106 checks, ~2 min 45 s
+./reproduce.sh              # 107 checks, ~3 min
 ./reproduce.sh esbmc        # or one leg, in the order they run: esbmc, ctest,
                             # sanitizer, fuzz, delta, reachability, fix
 ```

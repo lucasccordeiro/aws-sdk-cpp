@@ -175,9 +175,11 @@ the way a generated deserializer does — under ASan and UBSan. On our runs:
 ESBMC picked 2^63 for J-2 with nothing to go on but the branch condition — the
 same boundary the hand analysis below arrives at, reached independently. Under
 the patch all eight are clean, and the suite checks that as presence of an
-answer rather than absence of a crash: both J-1 witnesses print their document
-back, all three J-2 witnesses read a value with no sanitizer diagnostic, and all
-three J-3 witnesses read back exactly.
+answer rather than absence of a crash — on both sides, since a binary that
+printed nothing is also a binary with no diagnostic. Pristine and patched alike,
+all three J-2 witnesses must read a value; under the patch both J-1 witnesses
+must print their document back and all three J-3 witnesses must read back
+exactly.
 
 Two guards keep the replays honest. The J-2 driver checks that its rendered text
 parses back bit-identical to the double the solver chose before trusting the
@@ -536,14 +538,15 @@ for the Base64 defects.
   printer fails, rather than the `"{}"`/`"null"` each returns for an empty
   document; see below.
 - **StringUtils.cpp** replaces `atoll`/`atol` with `strtoll`/`strtol`, which are
-  defined on overflow.
+  defined on overflow. `ConvertToInt64` is reached from JSON through `AsInt64`
+  and from other callers besides. The `__ANDROID__` arm goes with it: it existed
+  to avoid `std::atoll` on old bionic, and both arms would otherwise call the
+  same function.
 
 The two helpers are duplicated into `JsonSerializer.cpp` and `Document.cpp`
 rather than shared through a header, because `Document.cpp` already carries its
 own copy of every accessor body the patch touches; a shared internal header would
-be the cleaner shape and a wider change than this patch. Reached from JSON via `AsInt64`, and from other callers.
-  The `__ANDROID__` arm goes with it: it existed to avoid `std::atoll` on old
-  bionic, and both arms would otherwise call the same function.
+be the cleaner shape and a wider change than this patch.
 
 After the patch: all fifteen response bodies read back with no diagnostic under
 ASan and UBSan, through `JsonValue` and through `Document`, none aborts, the
@@ -627,7 +630,7 @@ printer error, not J-1 itself.
 ## Reproducing
 
 ```sh
-./reproduce.sh              # 106 checks, ~2 min 45 s
+./reproduce.sh              # 107 checks, ~3 min
 ./reproduce.sh esbmc        # or one leg at a time, in the order they run:
                             # esbmc, ctest, sanitizer, fuzz, delta,
                             # reachability, fix

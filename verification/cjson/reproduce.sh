@@ -48,7 +48,7 @@ PRINT_UNWIND=45
 LITERAL_FLAGS="--unwind 10 --array-flattener"
 # What a complete run makes. Asserted at the end, so a leg that returned early is
 # a failure rather than a shorter run.
-EXPECTED_CHECKS=106
+EXPECTED_CHECKS=107
 CXX=${CXX:-g++}
 INCLUDES="-Istubs -Ivendor/include"
 STUBS="stubs/aws_memory_stub.cpp stubs/aws_logging_link_stub.cpp"
@@ -307,13 +307,17 @@ leg_ctest() {
   eq "and each one yields an executable test case" "3 cases" \
     "$(find results/esbmc-ctest -name 'test_case_*.cpp' | wc -l) cases"
 
-  local undefined=0 defined=0 fixed_diagnostics=0 fixed_read=0 infidelity=0
+  local undefined=0 defined=0 fixed_diagnostics=0 fixed_read=0 infidelity=0 read=0
   n=0
   for tc in $cases; do
     n=$((n + 1))
     build "results/replay_$n" harnesses/json_number_replay.cpp "$tc" $MODULES $STUBS $SAN || return
     run_replay ./results/replay_$n
     [[ $replay_status -ne 0 ]] && infidelity=$((infidelity + 1))
+    # "defined" is the no-diagnostic bucket, which a binary that printed nothing
+    # also lands in, so the answer is counted beside it rather than inferred from
+    # the driver's source.
+    [[ "$replay_out" == *"AsInt64="* ]] && read=$((read + 1))
     if [[ $(san_count "$replay_out") -gt 0 ]]; then undefined=$((undefined + 1))
     else defined=$((defined + 1)); fi
 
@@ -326,6 +330,7 @@ leg_ctest() {
   # the replay is not running the counterexample it claims to. Rendering with
   # %.6g instead of %.17g makes this row fire.
   eq "each witness survives rendering to a response body" "0 lost" "$infidelity lost"
+  eq "all three reach the accessors and read a value" "3 read" "$read read"
   eq "the two out-of-range witnesses are undefined on the pristine accessors" \
     "2 undefined" "$undefined undefined"
   eq "and the representable one is not"  "1 defined"   "$defined defined"

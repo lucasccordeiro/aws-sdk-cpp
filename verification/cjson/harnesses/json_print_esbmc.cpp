@@ -54,10 +54,11 @@ static bool print_number_succeeds(const char *valuestring)
      *   output_pointer = ensure(output_buffer, literal_length + sizeof(""));
      *   if (output_pointer == NULL) { return false; }
      *
-     * ensure() has one length-dependent way to fail -- `needed > INT_MAX`
-     * (cJSON.cpp:517-521) -- so that is the guard the patched arm is asked
-     * about. Its other failures are allocation and a corrupt printbuffer, which
-     * do not depend on the literal and are out of scope for J-1.
+     * ensure() fails on the literal's length only at INT_MAX, which it tests
+     * twice: on the requested size (cJSON.cpp:517-521) and again after adding
+     * the buffer's offset (:534-543). The guard below stands for both. Its
+     * remaining failures are allocation and a corrupt printbuffer, neither of
+     * which depends on the literal, and neither is what J-1 is about.
      *
      * The row therefore has content in the same shape the pristine one does:
      * the property fails if some length in range makes the printer return null,
