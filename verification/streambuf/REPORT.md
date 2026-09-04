@@ -302,7 +302,11 @@ headers. The native legs use neither file: they derive from the real
 `<streambuf>` and reach the functions the way an application does, through
 `std::iostream`.
 
-Two operational-model gaps, both new, both siblings of #7331-7333:
+Two operational-model gaps, both siblings of #7331-7333, both now filed as
+[esbmc#7539](https://github.com/esbmc/esbmc/issues/7539) (the get and put
+areas) and [esbmc#7540](https://github.com/esbmc/esbmc/issues/7540) (the
+stream types), each with a standalone reproducer under
+`../esbmc_bug_repros/`:
 
 | Gap | Where it bites | Model |
 |---|---|---|

@@ -150,12 +150,12 @@ instead of about the SDK. `stubs/esbmc/streambuf_model.h` supplies exactly the
 postconditions the standard states for those members, and deliberately not
 `setg`'s *precondition*, which is the thing under test.
 
-Two operational-model gaps, both new:
+Two operational-model gaps, both now filed:
 
-| Gap | Where |
-|---|---|
-| `basic_streambuf`'s `eback`/`gptr`/`egptr`/`gbump`/`setg`/`pbase`/`pptr`/`epptr`/`pbump`/`setp` are declared, never defined | `src/cpp/library/streambuf:83-96` |
-| `std::streampos` and `std::streamoff` exist only as members of `class ios`, and as `int` | `src/cpp/library/ios:162-163` |
+| Gap | Where | Issue |
+|---|---|---|
+| `basic_streambuf`'s `eback`/`gptr`/`egptr`/`gbump`/`setg`/`pbase`/`pptr`/`epptr`/`pbump`/`setp` are declared, never defined | `src/cpp/library/streambuf:83-96` | [esbmc#7539](https://github.com/esbmc/esbmc/issues/7539) |
+| `std::streampos` and `std::streamoff` exist only as members of `class ios`, and as `int` | `src/cpp/library/ios:162-163` | [esbmc#7540](https://github.com/esbmc/esbmc/issues/7540) |
 
 They are the successors to esbmc/esbmc#7331-7333 and are why any user-derived
 stream buffer is currently unverifiable as written — a search for

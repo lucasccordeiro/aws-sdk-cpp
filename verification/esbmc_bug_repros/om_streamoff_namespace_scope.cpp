@@ -19,6 +19,8 @@
  * any mainstream target; [iosfwd.syn] declares streampos as
  * fpos<char_traits<char>::state_type>, not an integer at all.
  *
+ * Filed as esbmc/esbmc#7540.
+ *
  * Expected: VERIFICATION SUCCESSFUL.
  * Observed on ESBMC 8.4.0 and 8.5.0.
  */

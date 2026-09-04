@@ -16,6 +16,8 @@
  *   FAILED  [main.assertion.2]  setg postcondition: gptr() <= egptr()
  *   VERIFICATION FAILED
  *
+ * Filed as esbmc/esbmc#7539.
+ *
  * Expected: VERIFICATION SUCCESSFUL.
  * Observed on ESBMC 8.4.0 and 8.5.0.
  */
