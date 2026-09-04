@@ -12,9 +12,10 @@ identical members of `Aws::Utils::DocumentView` (`.../source/utils/Document.cpp`
 **Cross-check:** GCC and clang with AddressSanitizer and UBSan, libFuzzer over
 the parser, and ESBMC 8.5.0 under both Bitwuzla and Z3
 **Status:** three defects, all on the path a **service response body** takes into
-an application. The parser itself is not one of them: 595k libFuzzer executions
-over parse / print / re-parse under ASan and UBSan found nothing, and the fork
-carries no memory-safety drift from upstream cJSON v1.7.19. All three grow out of
+an application, one of them a **regression first shipped in 1.11.660**. The
+parser itself is not one of them: 595k libFuzzer executions over parse / print /
+re-parse under ASan and UBSan found nothing, and the fork carries no
+memory-safety drift from upstream cJSON v1.7.19. All three grow out of
 one feature AWS added on top of upstream, and all three are closed by the patch
 in `fix/`.
 
@@ -31,9 +32,9 @@ wire-controlled, unbounded-length string on a field the printer assumes is short
 
 | # | Defect | Effect | Trigger |
 |---|--------|--------|---------|
-| **J-1** | `WriteCompact`/`WriteReadable` build `Aws::String` from whatever `cJSON_AS4CPP_Print*` returns, with no null check (`JsonSerializer.cpp:680,697`; `Document.cpp:655,668`) — and `print_number`'s 26-byte buffer cannot hold a longer literal, so the whole document fails to print | `std::logic_error`, **process abort** (exit 134) | a response number of 26 or more characters |
-| **J-2** | `static_cast<long long>(valuedouble)` with no range check, at four sites (`JsonSerializer.cpp:502,515,641,656`; `Document.cpp:492,506,519,549`) | undefined behaviour, [conv.fpint]/1; in practice a garbage value — `INT64_MIN` on x86-64 | any response number outside the `int64` range written with a decimal point, e.g. `1.5e300`, or `inf` from `1.0e999` |
-| **J-3** | the kept literal is read with `std::atoll` (`StringUtils.cpp:337-349`), which stops at the exponent and is undefined on overflow (C 7.22.1.2p3) | **`{"n":5e9}` reads back as `5`** | any integer written in exponent form, in range or not |
+| **J-1** | `WriteCompact`/`WriteReadable` build `Aws::String` from whatever `cJSON_AS4CPP_Print*` returns, with no null check (`JsonSerializer.cpp:680,697`; `Document.cpp:655,668`) — and `print_number`'s 26-byte buffer cannot hold a longer literal, so the whole document fails to print | `std::logic_error`, **process abort** (exit 134) | a response number of 26 or more characters, written without a decimal point |
+| **J-2** | `static_cast<long long>(valuedouble)` with no range check, at four sites in each of the two files (`JsonSerializer.cpp:502,515,641,656`; `Document.cpp:492,506,519,549`) | undefined behaviour, [conv.fpint]/1; in practice a garbage value — `INT64_MIN` on x86-64 | any response number outside the `int64` range written with a decimal point, e.g. `1.5e300`, or `inf` from `1.0e999` |
+| **J-3** | the kept literal is read with `std::atoll` (`StringUtils.cpp:337-349`), which stops at the exponent and is undefined on overflow (C 7.22.1.2p3) | **`{"n":5e9}` reads back as `5`**, since 1.11.660 | any integer written in exponent form, in range or not |
 
 J-1 aborts. J-2 and J-3 are wrong answers, one of them undefined.
 
@@ -107,7 +108,8 @@ sign and an exponent.
 
 ### The defect
 
-Four sites read `valuedouble` straight into a 64-bit integer:
+Four sites in each of the two files read `valuedouble` straight into a 64-bit
+integer:
 
 ```cpp
 int64_t JsonView::AsInt64() const
@@ -144,8 +146,8 @@ the comment *"can be double or value larger than int_max, but at least not UB"*
 | | `JsonSerializer.cpp:656` — same |
 | | `JsonSerializer.cpp:515` — same, in `AsInt64` |
 | | `JsonSerializer.cpp:502` — same, in `GetInt64`, which is the one generated code calls |
-| `{"n":1.0e999}` | the same three sites, `inf is outside the range` |
-| `{"n":1.5e300}` through `Document` | `Document.cpp:492` and `Document.cpp:519` |
+| `{"n":1.0e999}` | the same four sites, `inf is outside the range` |
+| `{"n":1.5e300}` through `Document` | `Document.cpp:492`, `:506`, `:519` and `:549` |
 | observed value | `AsInt64` returns `-9223372036854775808` |
 
 **Note for anyone re-running this:** GCC does not include
@@ -203,6 +205,45 @@ values through its own copy of the branch (`JsonSerializer.cpp:502`).
 
 No sanitizer fires on any of these: J-3 is a wrong answer, not a memory error.
 
+### When it started
+
+Until 1.11.659 the guard was `isInteger`, and `isInteger` was cleared on `e`/`E`
+as well as on `.`, so an exponent form kept **no literal at all**: `valuestring`
+was null, `AsInt64` took the double branch, and the answer was right. Commit
+[`87042947e93a`](https://github.com/aws/aws-sdk-cpp/commit/87042947e93a)
+("update cjson dep to 1.7.19", 2025-09-30) replaced the flag with
+`has_decimal_point`, which only `.` sets:
+
+```diff
+-    bool isInteger = true;
++    cJSON_AS4CPP_bool has_decimal_point = false;
+             case 'e':
+             case 'E':
+-                isInteger = false;      /* the arm that no longer exists */
+             case '.':
+-                isInteger = false;
++                has_decimal_point = true;
+-    if (isInteger && (number > INT_MAX || number < INT_MIN))
++    if (!has_decimal_point && (number > INT_MAX || number < INT_MIN))
+```
+
+`JsonView::AsInt64` is byte-identical across the change, so the parser's decision
+to keep the literal is the whole of the difference. Built against each release's
+own `cJSON.cpp`, driving the accessor's exact branch:
+
+| Release | `valuestring` for `{"n":5e9}` | `AsInt64` |
+|---|---|---|
+| 1.11.659 | none | **5000000000** — correct |
+| 1.11.660 | `5e9` | **5** |
+
+By tag bisection 1.11.659 is the last release without the defect and 1.11.660
+(2025-10-01) the first with it.
+
+The same change reshapes J-2 rather than causing it: at 1.11.659 `{"n":1e300}`
+had no literal either, so it reached the unguarded conversion and was undefined
+(observed `INT64_MIN`); at 1.11.886 it takes the literal path and reads `1`. The
+defect moved, it did not close.
+
 ## Symbolic confirmation (ESBMC)
 
 ### Configuration, and why each flag is there
@@ -243,13 +284,17 @@ That is the right abstraction for J-2 — the conversion's precondition depends 
 the value and nothing else — and it is *not* a proof about the parser, which is
 covered by the fuzz leg instead.
 
-The other gap would be transcription: `JsonSerializer.cpp` is not in the
-harness's translation unit, so the `-D FIXED` rows are about a restatement of the
-fix rather than the fix itself. The `EQUIVALENCE` row closes that by carrying the
-patch's `ToInt64Saturating` verbatim beside the model and asserting they agree.
-Mutating the shipped copy's saturation branch breaks it, so the row has content.
-Nothing here covers `LiteralToInt64`, which is exercised by the native witness
-instead.
+The other gap is transcription, and it is **not** closed here. `JsonSerializer.cpp`
+is not in the harness's translation unit, so the `-D FIXED` rows are about a
+restatement of the fix rather than the fix itself. The `EQUIVALENCE` row narrows
+that to one level: it carries a hand-transcription of the patch's
+`ToInt64Saturating` — `long long` for `int64_t`, integer literals for
+`std::numeric_limits` — beside the model and asserts the two agree for every
+non-NaN double. Mutating *that copy* breaks the row; mutating the copy the patch
+actually ships does not, because nothing feeds the patch to ESBMC. What catches a
+mutation of the shipped helper is the native fix leg, which builds the patched
+tree and checks its answers. `LiteralToInt64` is likewise covered only by the
+native witness.
 
 ## Fuzzing — where the defects are not
 
@@ -370,7 +415,12 @@ for the Base64 defects.
   printer fails, rather than the `"{}"`/`"null"` each returns for an empty
   document; see below.
 - **StringUtils.cpp** replaces `atoll`/`atol` with `strtoll`/`strtol`, which are
-  defined on overflow. Reached from JSON via `AsInt64`, and from other callers.
+  defined on overflow.
+
+The two helpers are duplicated into `JsonSerializer.cpp` and `Document.cpp`
+rather than shared through a header, because `Document.cpp` already carries its
+own copy of every accessor body the patch touches; a shared internal header would
+be the cleaner shape and a wider change than this patch. Reached from JSON via `AsInt64`, and from other callers.
   The `__ANDROID__` arm goes with it: it existed to avoid `std::atoll` on old
   bionic, and both arms would otherwise call the same function.
 
@@ -402,12 +452,22 @@ printer error, not J-1 itself.
 - **It does not add a length limit to `parse_number`.** A response can still make
   the parser allocate a literal as long as the number it sends. That is bounded
   by the response body itself.
+- **It does not reconcile the predicates with the value.** `IsIntegerType` and
+  `IsFloatingPointType` keep their unchanged `valuestring` branch, which
+  classifies any literal containing `e` as non-integer; the patch adds the range
+  test only to the `valuedouble` branch. So after the fix `{"n":5e9}` reports
+  `IsIntegerType() == false` while `AsInt64()` returns the exact `5000000000`,
+  and the 26-digit case reports `true` while the value saturates. Before the fix
+  the two agreed by both being wrong. Reconciling them would change what
+  `IsIntegerType` means for a literal, which is a wider change than this patch.
 - **It does not touch `cJSON_AS4CPP_SetNumberHelper`** (`cJSON.cpp:427`), which
   updates `valuedouble` and `valueint` without clearing `valuestring`. An item
   parsed from a big-integer literal and then reset through `cJSON_SetNumberValue`
-  prints its stale literal. That is the fork's, not the patch's — but the patch
-  does change its symptom, since the stale literal now prints instead of failing
-  the document. No in-SDK caller does this; reported here so a reviewer does not
+  prints its stale literal. That is the fork's, not the patch's. The patch changes
+  the symptom only for a stale literal of 26 or more characters, which needs a
+  parsed big literal followed by `cJSON_SetNumberValue` — `cJSON_AS4CPP_CreateInt64`
+  caps at 20 (`char buf[21]`, `%lld`). Shorter stale literals printed before the
+  patch too. No in-SDK caller does this; reported here so a reviewer does not
   find it and wonder whether it was missed.
 
 ## Not claimed
@@ -422,8 +482,12 @@ printer error, not J-1 itself.
 - **Nothing about the other protocols.** The XML, CBOR and query paths were not
   analysed. `CborValue` reads response bodies through a different parser
   entirely.
-- **Not a regression.** The literal-keeping feature is present at 1.11.0 and
-  absent at 1.9.99, so it predates every release this exercise has looked at.
+- **J-1 and J-2 are not regressions. J-3 is.** The literal-keeping feature is
+  already present at 1.9.99
+  (`aws-cpp-sdk-core/source/external/cjson/cJSON.cpp:361-366`, before the tree
+  moved under `src/`), so J-1 and J-2 predate every release this exercise has
+  looked at. J-3's exponent-form corruption does not — it was introduced by
+  `87042947e93a` and first shipped in **1.11.660**; see *When it started*.
 - **The fuzzing bound is a bound.** 595k executions over one entry point is not a
   proof of the parser's memory safety; it is the reason this report does not
   claim a defect there.

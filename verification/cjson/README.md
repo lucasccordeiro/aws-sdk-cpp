@@ -13,7 +13,7 @@ v1.7.19 with no memory-safety drift. What upstream's fuzzing cannot see is the
 one feature AWS added on top, and the C++ layer above it.
 
 **The feature.** Upstream parses every number into a `double`. AWS also keeps the
-literal, so that big integers do not lose precision (`cJSON.cpp:399-403`):
+literal, so that big integers do not lose precision (`cJSON.cpp:397-402`):
 
 ```cpp
     // For integer which is out of the range of [INT_MIN, INT_MAX], it may lose precision if we cast it to double.
@@ -87,6 +87,13 @@ hand, and the application reads **5**. `parse_number` keeps a literal for
 anything outside **`int`**'s range, so this is not confined to numbers too large
 to represent.
 
+This one is a **regression**. Until 1.11.659 the guard was `isInteger`, cleared
+on `e`/`E` as well as on `.`, so an exponent form kept no literal and `AsInt64`
+answered `5000000000`. Commit `87042947e93a` ("update cjson dep to 1.7.19")
+replaced it with `has_decimal_point`, which only `.` sets. Built against each
+release's own parser, `{"n":5e9}` gives `5000000000` at 1.11.659 and `5` at
+1.11.660 — `AsInt64` itself is byte-identical across the change.
+
 ## Layout
 
 ```
@@ -131,9 +138,12 @@ that cannot run has not agreed with anything, so it must not read as a pass.
   removing.
 * The fuzz leg needs clang with libFuzzer; the proofs need ESBMC 8.5.0 with both
   Z3 and Bitwuzla, and every proof row is run under both.
-* Nothing here calls `cJSON_AS4CPP_InitHooks`, and neither does
-  `aws-cpp-sdk-core`: the parser runs on the default `malloc`/`free` hooks in the
-  SDK too.
+* **The allocator model is faithful, but not because hooks are absent.**
+  `Aws::InitAPI` does install cJSON hooks (`Aws.cpp:165-168`) — they route to
+  `Aws::Malloc`/`Aws::Free`, which fall through to `malloc`/`free` when no memory
+  system is installed and `USE_AWS_MEMORY_MANAGEMENT` is undefined
+  (`AWSMemory.cpp:130-174`, which `stubs/aws_memory_stub.cpp` models). Nothing
+  here calls `InitHooks`, so ASan sees real `malloc`/`free` either way.
 
 Findings generated with AI tools and reviewed by Lucas Cordeiro, University of
 Manchester.

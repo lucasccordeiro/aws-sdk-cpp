@@ -70,7 +70,9 @@ the parsed `double` to a 64-bit integer with no range check, which is undefined
 for `{"n":1.5e300}` and for the `inf` that `{"n":1.0e999}` parses to, and the
 kept literal is read back with `atoll`, which stops at the exponent — so
 `{"n":5e9}` reads as `5`, nine orders of magnitude off a value `int64` holds
-exactly. Generated deserializers reach the last two on every `int64` field, with
+exactly. That last one is a regression, first shipped in 1.11.660: before it the
+literal was not kept for exponent forms at all, and the same body read back
+correctly. Generated deserializers reach the last two on every `int64` field, with
 no logging and no application involvement. A patch and
 the proofs are in [verification/cjson/](verification/cjson/).
 

@@ -6,8 +6,10 @@
  * then -- for the round-trip leg -- print and re-parse, which is what
  * JsonValue::View::WriteCompact / WriteReadable do.
  *
- * Default allocation hooks are in force here. The SDK leaves them at malloc/free
- * as well: nothing in aws-cpp-sdk-core calls cJSON_AS4CPP_InitHooks.
+ * Default allocation hooks are in force here. Aws::InitAPI does install cJSON
+ * hooks (Aws.cpp:165-168), but they route to Aws::Malloc/Aws::Free, which fall
+ * through to malloc/free with no memory system installed -- so the fuzzer sees
+ * the same real heap allocations, with real redzones, that the SDK does.
  */
 #include <aws/core/external/cjson/cJSON.h>
 
