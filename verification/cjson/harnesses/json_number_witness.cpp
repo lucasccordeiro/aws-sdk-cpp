@@ -8,6 +8,8 @@
  *   JsonView::IsIntegerType                JsonSerializer.cpp:629
  *
  * Every input below is a well-formed JSON document that a service could return.
+ * Cases 0-6 are the ones REPORT.md and README.md quote by index; 7-14 pin the
+ * two boundaries (J-1's 26th character, J-2's 2^63) from both sides.
  */
 #include <aws/core/utils/json/JsonSerializer.h>
 #include <aws/core/utils/Document.h>
@@ -58,10 +60,28 @@ static const struct { const char* label; const char* body; } CASES[] = {
      * still kept as a literal, which is what makes J-3 a corruption of a value
      * the SDK could have represented exactly. */
     {"exp-in-range", "{\"n\":5e9}"},
+    /* Everything below is likewise appended to keep 0-6 stable.
+     *
+     * The passing side of J-1's boundary: one character shorter than case 5,
+     * so print_number's `length > 25` guard admits it. */
+    {"25-digits",  "{\"n\":9999999999999999999999999}"},
+    /* J-2's boundary, and the reason the fix's guard is half-open. 2^63 is the
+     * smallest double outside int64's range, and (double)INT64_MAX rounds up to
+     * it -- so a guard written `d <= (double)INT64_MAX` would admit exactly this
+     * value and stay undefined. Its negative counterpart is representable,
+     * because the range is asymmetric, and must NOT saturate. */
+    {"two-63",     "{\"n\":9223372036854775808.0}"},
+    {"int64-min",  "{\"n\":-9223372036854775808.0}"},
+    {"below-min",  "{\"n\":-9223372036854777856.0}"},
+    {"neg-inf",    "{\"n\":-1.0e999}"},
+    {"neg-zero",   "{\"n\":-0.0}"},
+    /* The literal path at both ends: in range exactly, and one past it. */
+    {"min-lit",    "{\"n\":-9223372036854775808}"},
+    {"max-lit-p1", "{\"n\":9223372036854775808}"},
 };
 
 /* Document carries the same four accessors and the same two writers
- * (Document.cpp:492, :502, :515, :549, :655, :668), so the evidence has to
+ * (Document.cpp:492, :506, :519, :549, :655, :668), so the evidence has to
  * cover it too rather than argue from the fact that the code is identical. */
 static void probe_document(const char* label, const char* body)
 {

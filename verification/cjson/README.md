@@ -103,8 +103,8 @@ vendor/         PRISTINE upstream sources -- cJSON.cpp, JsonSerializer.cpp,
                 provenance; the reachability leg re-checks all 25 files.
 reference/      upstream cJSON v1.7.19, for the delta leg. Third-party, and the
                 only thing here that is not AWS's code.
-harnesses/      json_number_witness.cpp   six response bodies through JsonValue
-                                          and through Document
+harnesses/      json_number_witness.cpp   fifteen response bodies through
+                                          JsonValue and through Document
                 json_number_esbmc.cpp     the conversion, over a symbolic double
                 cjson_parse_fuzz.cpp      libFuzzer entry point for the parser
 stubs/          verification-only substitutes (memory system, logging, the two
@@ -116,7 +116,7 @@ results/        build outputs and logs (regenerated; safe to delete)
 ## Running
 
 ```sh
-./reproduce.sh              # 55 checks, ~25 s
+./reproduce.sh              # 70 checks, ~30 s
 ./reproduce.sh sanitizer    # or one leg: sanitizer, esbmc, fuzz, delta,
                             # reachability, fix
 ```

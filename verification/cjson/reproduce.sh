@@ -24,6 +24,9 @@ CORE=src/aws-cpp-sdk-core
 # Pins the size of the evidence tree, so a vanished vendor/ fails loudly instead
 # of passing a drift check it never ran.
 VENDORED_FILES=25
+# Highest index in the witness's case table; the fix leg sweeps 0..LAST_CASE
+# through both accessors.
+LAST_CASE=14
 # Pins the content of the normalised fork-vs-upstream diff, not just its size.
 DELTA_SHA=22dff753a93bc9b6
 CXX=${CXX:-g++}
@@ -92,7 +95,7 @@ violated() { # violated <source> [flags...] -- the property name ESBMC reports
 }
 
 leg_sanitizer() {
-  echo "[1/6] Sanitizers -- the pristine accessors on six response bodies"
+  echo "[1/6] Sanitizers -- the pristine accessors on fifteen response bodies"
   mkdir -p results
   build results/witness harnesses/json_number_witness.cpp $MODULES $STUBS $SAN || return
 
@@ -118,6 +121,9 @@ leg_sanitizer() {
   # J-2: the same number written with a decimal point takes the double path.
   local dot; dot=$(./results/witness 3 2>&1)
   check "J-2: AsInt64 converts out of range"           "JsonSerializer.cpp:515"      "$dot"
+  # The site the reachability argument rests on: GetInt64(key) is what a
+  # generated deserializer calls, so it must be asserted, not inferred from :515.
+  check "J-2: and GetInt64, which generated code calls" "JsonSerializer.cpp:502"     "$dot"
   check "J-2: so does IsIntegerType"                   "JsonSerializer.cpp:641"      "$dot"
   check "J-2: and IsFloatingPointType"                 "JsonSerializer.cpp:656"      "$dot"
   check "and the diagnosis names the standard's words" "outside the range of representable values" "$dot"
@@ -130,9 +136,30 @@ leg_sanitizer() {
   check "J-1: and the write builds a string from null" "construction from null"      "$big"
   eq    "J-1: which aborts the process"                "134"                          "$(status_of ./results/witness 5)"
 
+  # J-1's boundary from the passing side. One character shorter, and the same
+  # body prints: without this the suite pins only that 26 fails, not that 25
+  # works, and a printer that rejected every literal would still pass.
+  local ok25; ok25=$(./results/witness 7 2>&1)
+  check "J-1: 25 characters print normally" \
+    'round-trip: {"n":9999999999999999999999999}' "$ok25"
+  eq    "and that case does not abort"                 "0"   "$(status_of ./results/witness 7)"
+
+  # J-2's boundary. 2^63 is the smallest double outside the range, so this is
+  # where a guard written `d <= (double)INT64_MAX` would still be undefined.
+  local b63; b63=$(./results/witness 8 2>&1)
+  check "J-2 starts at exactly 2^63, not only at huge values" \
+    "9.22337e+18 is outside the range" "$b63"
+  check "and a positive wire value reads back negative"  "AsInt64=-9223372036854775808" "$b63"
+  # The other side of the same boundary: -2^63 is representable, so it must be
+  # clean. A fix that saturated here would be over-correcting.
+  local bmin; bmin=$(./results/witness 9 2>&1)
+  check "while -2^63 is representable and exact"       "AsInt64=-9223372036854775808" "$bmin"
+  check "with no diagnostic"                           "diagnostics=0" "diagnostics=$(san_count "$bmin")"
+
   # Document carries its own copy of all six sites.
   local doc; doc=$(./results/witness document 3 2>&1)
   check "J-2 again in Document::IsIntegerType"         "Document.cpp:492"            "$doc"
+  check "J-2 again in Document::GetInt64"              "Document.cpp:506"            "$doc"
   check "J-2 again in Document::AsInt64"               "Document.cpp:519"            "$doc"
   check "and in Document::IsFloatingPointType"         "Document.cpp:549"            "$doc"
   eq    "J-1 again in Document::WriteCompact"          "134"                          "$(status_of ./results/witness document 5)"
@@ -259,8 +286,12 @@ leg_reachability() {
     "$(grep -m1 'return JsonValue(rawPayloadStr)' "$tmp/Marshaller.cpp")"
   check "and prints it back through WriteReadable"      "payloadView.WriteReadable()" \
     "$(grep -m1 'Error response is' "$tmp/Marshaller.cpp")"
+  # AWS_LOGSTREAM_TRACE expands to AWS_LOGSTREAM, not AWS_LOG, and each defines
+  # its own guard. `grep -m1` finds AWS_LOG's, which would stay green if the
+  # guard were dropped from the macro J-1 actually goes through.
   check "behind a level guard, so trace has to be on"   "logSystem->GetLogLevel() >= level" \
-    "$(grep -m1 'GetLogLevel() >= level' vendor/include/aws/core/utils/logging/LogMacros.h)"
+    "$(sed -n '/define AWS_LOGSTREAM(/,/^$/p' vendor/include/aws/core/utils/logging/LogMacros.h |
+       grep -m1 'GetLogLevel() >= level')"
 
   # J-2 and J-3 need no logging: this is what a generated deserializer does with
   # every int64 field a service returns.
@@ -270,7 +301,7 @@ leg_reachability() {
 }
 
 leg_fix() {
-  echo "[6/6] Fix -- the same six bodies, patched"
+  echo "[6/6] Fix -- the same bodies, patched"
   mkdir -p results
   local tree; tree=$(mktemp -d)
   local rel
@@ -293,9 +324,13 @@ leg_fix() {
     "$tree/$CORE/source/utils/StringUtils.cpp" \
     "$tree/$CORE/source/external/cjson/cJSON.cpp" $STUBS $SAN || { rm -rf "$tree"; return; }
 
+  # Every case, through both accessors: REPORT.md claims the patched tree is
+  # clean, and the Document half of that claim was previously unmeasured.
   local i out all_clean=0
-  for i in 0 1 2 3 4 5 6; do
+  for i in $(seq 0 "$LAST_CASE"); do
     out=$(./results/witness_fixed $i 2>&1)
+    all_clean=$((all_clean + $(san_count "$out")))
+    out=$(./results/witness_fixed document $i 2>&1)
     all_clean=$((all_clean + $(san_count "$out")))
   done
   check "no case leaves a sanitizer diagnostic behind" "diagnostics=0" "diagnostics=$all_clean"
@@ -317,12 +352,33 @@ leg_fix() {
   check "Document round-trips it as well" \
     'round-trip: {"n":99999999999999999999999999}' "$doc"
 
+  # The boundary, both sides. 2^63 must saturate and -2^63 must not: a guard
+  # written `d <= (double)INT64_MAX` passes the second and fails the first,
+  # which is the mistake these two rows exist to catch.
+  check "2^63 saturates rather than converting"        "AsInt64=9223372036854775807" \
+    "$(./results/witness_fixed 8 2>&1)"
+  check "and -2^63 stays exact"                        "AsInt64=-9223372036854775808" \
+    "$(./results/witness_fixed 9 2>&1)"
+  check "the first double below the range saturates low" "AsInt64=-9223372036854775808" \
+    "$(./results/witness_fixed 10 2>&1)"
+  check "-inf saturates low too"                       "AsInt64=-9223372036854775808" \
+    "$(./results/witness_fixed 11 2>&1)"
+  check "-0.0 reads back as zero"                      "AsInt64=0 " \
+    "$(./results/witness_fixed 12 2>&1)"
+  check "the minimum as a literal is exact"            "AsInt64=-9223372036854775808" \
+    "$(./results/witness_fixed 13 2>&1)"
+  check "and one past the maximum saturates"           "AsInt64=9223372036854775807" \
+    "$(./results/witness_fixed 14 2>&1)"
+
   rm -rf "$tree"
 
   command -v esbmc >/dev/null || { skip "esbmc not on PATH"; return; }
   both_solvers "the guarded conversion holds for every double" "VERIFICATION SUCCESSFUL" \
     harnesses/json_number_esbmc.cpp -D FIXED
-  both_solvers "and the shipped helper is the one proved" "VERIFICATION SUCCESSFUL" \
+  # Not "the shipped helper is proved": nothing feeds fix/ to ESBMC. This pins
+  # the model against a transcription of the patch's helper. The shipped copy is
+  # covered by the native rows above, which do fail when it is mutated.
+  both_solvers "the model and a transcription of the helper agree" "VERIFICATION SUCCESSFUL" \
     harnesses/json_number_esbmc.cpp -D FIXED -D EQUIVALENCE
 }
 

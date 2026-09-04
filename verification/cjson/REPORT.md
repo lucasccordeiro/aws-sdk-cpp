@@ -149,6 +149,15 @@ the comment *"can be double or value larger than int_max, but at least not UB"*
 | `{"n":1.0e999}` | the same four sites, `inf is outside the range` |
 | `{"n":1.5e300}` through `Document` | `Document.cpp:492`, `:506`, `:519` and `:549` |
 | observed value | `AsInt64` returns `-9223372036854775808` |
+| `{"n":9223372036854775808.0}` — exactly 2^63 | the same four sites; a **positive** wire value reads back as `-9223372036854775808` |
+| `{"n":-9223372036854775808.0}` — exactly −2^63 | clean, and exact |
+
+The last two rows are the boundary. 2^63 is the smallest double outside
+`int64`'s range, so the defect does not need an absurd magnitude; −2^63 *is*
+representable, because the range is asymmetric. Any fix has to saturate the first
+and not the second, which rules out the guard one would write first:
+`d <= (double)INT64_MAX` is `d <= 2^63` after the conversion rounds up, and it
+admits exactly the value that is still undefined.
 
 **Note for anyone re-running this:** GCC does not include
 `float-cast-overflow` in `-fsanitize=undefined`. Under plain `-fsanitize=undefined`
@@ -424,9 +433,12 @@ be the cleaner shape and a wider change than this patch. Reached from JSON via `
   The `__ANDROID__` arm goes with it: it existed to avoid `std::atoll` on old
   bionic, and both arms would otherwise call the same function.
 
-After the patch: all six response bodies read back with no diagnostic under ASan
-and UBSan, none aborts, the 26-digit literal survives the round trip, and the
-guarded conversion is SUCCESSFUL under both solvers.
+After the patch: all fifteen response bodies read back with no diagnostic under
+ASan and UBSan, through `JsonValue` and through `Document`, none aborts, the
+26-digit literal survives the round trip, the boundary saturates on one side and
+stays exact on the other, and the guarded conversion is SUCCESSFUL under both
+solvers. Mutating the guard to `d <= (double)INT64_MAX` reintroduces the 2^63
+diagnostic and fails the suite, so those rows are not decoration.
 
 ### Why the writers return an empty string
 
@@ -495,7 +507,7 @@ printer error, not J-1 itself.
 ## Reproducing
 
 ```sh
-./reproduce.sh              # 55 checks, ~25 s
+./reproduce.sh              # 70 checks, ~30 s
 ./reproduce.sh sanitizer    # or one leg at a time: sanitizer, esbmc, fuzz,
                             # delta, reachability, fix
 ```
