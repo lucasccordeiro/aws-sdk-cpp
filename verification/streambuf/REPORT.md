@@ -22,8 +22,8 @@ public exported API rather than remotely triggerable ones.
 
 Both classes implement `seekoff`/`seekpos` by hand. `SimpleStreamBuf` also
 implements `underflow`. All three implementations disagree with the buffer they
-are documented as replacing (`SimpleStreamBuf.h:21`, "a replacement for
-`std::stringbuf`").
+are documented as replacing (`SimpleStreamBuf.h:21`, "A replacement for
+std::stringbuf when using Android and gnustl together").
 
 | # | Defect | Effect | Trigger |
 |---|--------|--------|---------|
@@ -73,10 +73,17 @@ same unguarded call:
 so a *write* after the rewind inverts the get area without `underflow` running at
 all. Both sites need the same guard, and the evidence below exercises both.
 
-[streambuf.get.area]/5 requires the three arguments of `setg` to form valid
-ranges: "`[gbeg, gnext)`, `[gbeg, gend)`, and `[gnext, gend)` are all valid
-ranges". `gnext > gend` is not one, so the call is undefined behaviour before
-anything reads from it.
+`setg`'s postcondition ([streambuf.get.area]/5) is that `gnext == gptr()` and
+`gend == egptr()`, so a `gnext` past `gend` leaves the class reporting
+`gptr() > egptr()` — a get area no read can use, and one no other operation in
+the class produces.
+
+The current working draft states this outright, as a *precondition* on `setg`:
+"`[gbeg, gnext)`, `[gbeg, gend)`, and `[gnext, gend)` are all valid ranges".
+C++11, which is what the SDK targets and what `reproduce.sh` passes to `--std`,
+states no such precondition — so the argument here does not lean on it. What
+follows below needs only the postcondition above and what libstdc++ then does
+with the inverted pointers.
 
 What reads from it is `std::basic_streambuf::xsgetn`, which the SDK does not
 override for this class. libstdc++ computes the available count as
@@ -95,7 +102,7 @@ pointer back to 10, keep reading. Nothing in it is out of contract for
 | Run | Result |
 |---|---|
 | `std::stringbuf`, same sequence | `gcount=10`, no diagnostic |
-| pointers after the read (`witness invariant`) | **`gptr=51 egptr=10 pptr=10`** — [streambuf.get.area]/5 violated |
+| pointers after the read (`witness invariant`) | **`gptr=51 egptr=10 pptr=10`** — `gptr` past `egptr` |
 | one-byte read past the written data (`witness stale`) | returns a heap byte the application never wrote (`0xbe` on this build) |
 | 50-byte read, ASan (`witness crash`) | `AddressSanitizer: negative-size-param: (size=-41)` in `memcpy`, via `std::basic_streambuf::xsgetn` |
 | the same, no sanitizer | **SIGSEGV** (exit 139) |
@@ -130,7 +137,7 @@ an assert, and the two asserts in `seekpos` are about a different thing.
                 }
 ```
 
-[stringbuf.virtuals] table 145 gives `newoff = high_mark - xbeg` for
+[stringbuf.virtuals] table 131 gives `newoff = high_mark - xbeg` for
 `way == ios_base::end`, and p11 assigns `xbeg + newoff + off`. The offset is
 **added**. Seeking to the last three bytes of a sequence is `off == -3`; `off`
 positive is past the end and must fail.
@@ -154,8 +161,9 @@ standard rather than an expectation invented here.
 | `seekg(+3,end)` | FAIL | **`'7'`** | **`'7'`** |
 
 `seekg(0, end)` is the row that still passes, and it is not luck: zero is its own
-negation. It is also the only end-relative seek the SDK performs on these
-buffers, which is why the defect has survived.
+negation. No in-SDK caller performs a *non-zero* end-relative seek on either
+buffer, which is why the defect has survived — upstream's own tests do, and pass
+only because the implementation subtracts (below).
 
 In a **debug build the failing seek is not a failure but an abort**: `seekpos`
 asserts `static_cast<size_t>(pos) <= maxSeek` (`:95`), the wrong-signed position
@@ -215,7 +223,7 @@ fixing T-2 will want to know:
 function returns `pos`, which is the encoding for success. `PreallocatedStreamBuf`
 is identical (`:61`, `:66`, `:71`).
 
-[stringbuf.virtuals] table 144 is explicit about this case: with both bits set
+[stringbuf.virtuals] table 130 is explicit about this case: with both bits set
 and `way == beg` or `way == end`, **both** sequences are positioned. Not one,
 not neither.
 
@@ -239,11 +247,11 @@ handles.
 
 | Flag | Why |
 |---|---|
-| `--std c++11` | the SDK's baseline |
+| `--std c++11` | the SDK's baseline, and the revision every paragraph and table number in this document is quoted from (N3337) |
 | `-D NDEBUG` | release semantics — the macro state of a shipped build. **Not** `--no-assertions`: that also drops `__ESBMC_assert`, leaving the harness unable to state any property. Runs without it are the debug semantics, and one row is reported in each |
 | `--unwind 4` | there is no loop in any function under test; the bound covers the harness's own construction |
 | `-D ESBMC_OM_MISSING_STREAMPOS` | supplies `std::streampos` and `std::streamoff`, which ESBMC's model declares only as members of `class ios`. Described in `stubs/esbmc/streambuf_model.h` |
-| `SIZE` (default 8) | the buffer the model reasons about. Every property is over every offset and every get area **of a buffer of at most 8 bytes** — the arithmetic under test is linear in the offset and has no other bound, but the proofs are that statement, not a larger one |
+| `SIZE` (default 8) | the buffer the model reasons about. Every property is over every offset in `[-9, +9]` — one past each end — and every get area **of a buffer of at most 8 bytes**. The arithmetic under test is linear in the offset and has no other bound, but the proofs are that statement, not a larger one |
 
 Input model: a symbolic data length and a symbolic seek offset, or a symbolic
 get/put area, per mode (`harnesses/streambuf_esbmc.cpp`). Properties are stated
@@ -252,7 +260,7 @@ with `__ESBMC_assert`, which survives `-D NDEBUG`.
 ### Results
 
 Every row run under **both Bitwuzla and Z3**, and on **both ESBMC 8.4.0 and
-8.5.0**; all four combinations agree. 2–6 s each.
+8.5.0**; all four combinations agree. 1–6 s each on this machine.
 
 | Mode | Semantics | Verdict | Witness |
 |---|---|---|---|
@@ -261,9 +269,9 @@ Every row run under **both Bitwuzla and Z3**, and on **both ESBMC 8.4.0 and
 | `SEEK_BACK` | release | **FAILED** | every backward seek lands elsewhere |
 | `SEEK_BACK` | debug | **FAILED** | stops at `SimpleStreamBuf.cpp:95`, the module's own assert |
 | `SEEK_BOTH` | release | **FAILED** | `pos=0`: success, nothing moved |
-| `GET_AREA` | release | **FAILED** | `gptr=4, egptr=4, pptr=0` |
+| `GET_AREA` | release | **FAILED** | enters `gptr=4 egptr=4 pptr=0`, exits `gptr=4 egptr=0` |
 | `PREALLOC_END` | release | **FAILED** | `length=8, off=+7`: returns 1, must fail |
-| `PREALLOC_BOTH` | release | **FAILED** | as `SEEK_BOTH` |
+| `PREALLOC_BOTH` | release | **FAILED** | `length=8, pos=1`: success, nothing moved |
 
 The control is the row that makes the rest mean something: with the offset fixed
 at zero the same property **verifies**, so `FAILED` above is not a harness that
@@ -292,9 +300,9 @@ nowhere and `gptr()` comes back unconstrained — `gptr() <= egptr()` is violabl
 on a freshly constructed buffer, before any SDK code runs. Every property here is
 about those pointers, so against the stock model every verdict would be about
 ESBMC rather than about the SDK. `stubs/esbmc/streambuf_model.h` supplies the
-postconditions [streambuf.get.area]/6 and [streambuf.put.area]/3 state, and
-nothing else; in particular it does **not** enforce `setg`'s precondition, since
-whether the SDK can break it is exactly what `GET_AREA` asks.
+postconditions [streambuf.get.area]/5 and [streambuf.put.area]/5 state, and
+nothing else; in particular it lets `setg` record a `gnext` past `gend`, since
+whether the SDK produces that state is exactly what `GET_AREA` asks.
 
 `stubs/esbmc/streambuf_scaffold.h` holds the two class declarations and the
 constructors the harness needs, and says which three things differ from the SDK
@@ -316,11 +324,13 @@ stream types), each with a standalone reproducer under
 Neither is within reach of a fix in this tree; the first is why the leg needs a
 stand-in base at all.
 
-One further note on versions. The 8.5.0 binary available here is a local build 18
-commits ahead of master, touching `goto-symex` and `smt_solver`. That is why
-every row was re-run on a **stock master build (8.4.0, commit `54172fc905`, zero
-commits ahead of `origin/master`)**, where the verdicts are identical. The
-native legs depend on no ESBMC build at all.
+One further note on versions. The 8.5.0 binary used here was, when the rows were
+first run, a local build ahead of master; every row was therefore re-run on a
+**stock master build (8.4.0, commit `54172fc905`, zero commits ahead of
+`origin/master`)**, where the verdicts are identical. The local checkout has
+since been returned to master (`1d04bf3b54`), so the two builds no longer differ
+in the way that made the re-run necessary. The native legs depend on no ESBMC
+build at all.
 
 ## Reachability
 
@@ -399,7 +409,7 @@ that T-1's consequence is memory corruption rather than a wrong value.
 +    if(egptr() < pptr())
 ```
 
-T-2 is the sign. T-3 is the bitmask, plus the two cases table 144 says must
+T-2 is the sign. T-3 is the bitmask, plus the two cases table 130 says must
 fail: `cur` with both bits set, and a `which` with neither. T-1 is the last
 hunk *and* the same guard wrapped around `xsputn:197`: the get area may still be
 extended to what has been written, and may no longer be pulled back behind the
@@ -407,9 +417,13 @@ position the caller is reading from. Both sites need it — guarding only
 `underflow` leaves the identical `memcpy` reachable by ending the sequence with a
 write instead of a read, which is what `./reproduce.sh fix` now checks.
 
-One ordering detail the patch relies on: in `seekpos` the `setg` runs before the
-`setp`, so under `in|out` the get-area end is the old put position and
-`gptr <= egptr` still holds. Swapping the two statements would break it.
+One ordering detail worth naming: in `seekpos` the `setg` runs before the
+`setp`, so under `in|out` the get area ends at the *old* put position and stays
+readable. Swapping the two statements does not break the invariant — with `setp`
+first, `pptr()` is already `m_buffer + pos`, so `setg` gets `gnext == gend`, an
+empty but well-formed range, and both ESBMC properties still verify. What it
+breaks is behaviour: nothing would be readable after an `in|out` seek. No
+property in the harness distinguishes the two orderings.
 
 After the patch, all six ESBMC properties verify under both solvers and both
 ESBMC versions, all 21 contract rows pass, the negative `memcpy` is gone, and the
@@ -427,8 +441,14 @@ quietly changing it. It is the same assert-instead-of-return shape as H-1 and is
 reported here rather than fixed, because a caller relying on the abort is easier
 to imagine than a caller relying on the sign.
 
+The bitmask fix is `seekpos`'s only. `seekoff`'s `cur` branch keeps its `==`
+(`SimpleStreamBuf.cpp:79,83`, `PreallocatedStreamBuf.cpp:37,41`), so
+`pubseekoff(0, cur, in|out)` returns `-1` where table 130 asks for a position —
+the patch trades one wrong answer for another there. Nothing reaches it:
+`seekg`, `seekp`, `tellg` and `tellp` all pass exactly one of the two bits.
+
 It also keeps `pptr()` as the notion of "the end" — in `seekoff`'s end branch and
-as `seekpos`'s `maxSeek` — where table 145 uses the high-water mark. After a
+as `seekpos`'s `maxSeek` — where table 131 uses the high-water mark. After a
 backward `seekp`, `seekg(0, end)` therefore lands at the put position rather than
 after the last byte written. That is pre-existing, it is the same
 `pptr()`-is-not-the-high-water-mark confusion T-1 comes out of, and fixing it
@@ -458,7 +478,7 @@ shape in code this target did not analyse.
 ## Reproducing
 
 ```sh
-./reproduce.sh              # 70 checks, ~1 min
+./reproduce.sh              # 73 checks, ~1 min
 ./reproduce.sh esbmc        # or one leg at a time: esbmc, sanitizer, tests,
                             # reachability, fix
 ```

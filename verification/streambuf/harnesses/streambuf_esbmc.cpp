@@ -12,15 +12,20 @@
  * ----------------------
  * SimpleStreamBuf is documented as a replacement for std::stringbuf
  * (SimpleStreamBuf.h:21), so [stringbuf.virtuals] is the contract both buffers
- * are read against here:
+ * are read against here. Paragraph and table numbers are C++11's (N3337), the
+ * standard the SDK targets and the one reproduce.sh passes to --std:
  *
- *   table 145 + p11  way == end gives newoff = high_mark - xbeg, and the new
+ *   table 131 + p11  way == end gives newoff = high_mark - xbeg, and the new
  *                    position is xbeg + newoff + off. The offset is *added*;
  *                    seeking to the last three bytes is off == -3.
- *   table 144        with in|out set and way == beg or end, *both* sequences
+ *   table 130        with in|out set and way == beg or end, *both* sequences
  *                    are positioned. Not one of them, and not neither.
- *   [streambuf.get.area]/5  setg requires [gbeg, gnext), [gbeg, gend) and
- *                    [gnext, gend) to be valid ranges, so gnext <= gend.
+ *   [streambuf.get.area]/5  setg's postcondition: gnext == gptr() and
+ *                    gend == egptr(). A gnext past gend therefore leaves
+ *                    gptr() > egptr(), and libstdc++'s xsgetn hands
+ *                    egptr() - gptr() to memcpy as a size_t. (C++11 states no
+ *                    precondition on the three arguments; the working draft
+ *                    added one, but nothing here needs it.)
  *
  * SEMANTICS
  * ---------
@@ -34,7 +39,7 @@
  * MODES
  * -----
  *   HARNESS_MODE_SEEK_END (default)
- *       SimpleStreamBuf::seekoff(off, end, in) against table 145.
+ *       SimpleStreamBuf::seekoff(off, end, in) against table 131.
  *
  *   HARNESS_MODE_SEEK_ZERO
  *       The same property with off == 0 -- the control. Expect SUCCESSFUL:
@@ -51,7 +56,7 @@
  *       same assert also fires for a seek that really is out of range.
  *
  *   HARNESS_MODE_SEEK_BOTH
- *       SimpleStreamBuf::seekpos(pos, in|out) against table 144: a call that
+ *       SimpleStreamBuf::seekpos(pos, in|out) against table 130: a call that
  *       reports success must have moved both pointers to pos.
  *
  *   HARNESS_MODE_GET_AREA
@@ -107,7 +112,7 @@ int main()
     const long getPos = SymbolicOffsetWithin(0, SIZE - 1);
     const long getEnd = SymbolicOffsetWithin(0, SIZE - 1);
     const long putPos = SymbolicOffsetWithin(0, SIZE);
-    __ESBMC_assume(getPos <= getEnd); /* [streambuf.get.area]/5 held on entry */
+    __ESBMC_assume(getPos <= getEnd); /* a well-formed get area on entry */
 
     buf.InstallAreas(getPos, getEnd, putPos);
     buf.underflow();
@@ -124,7 +129,7 @@ int main()
     __ESBMC_assert(
         got == SEEK_FAILED ||
             (buf.gptr() == buf.eback() + pos && buf.pptr() == buf.eback() + pos),
-        "a seek that reported success positioned neither sequence");
+        "a seek that reported success did not position both sequences");
 
 #else
     /* One past each end of the buffer, so the property covers the offsets that
@@ -141,7 +146,7 @@ int main()
 #endif
 
     const std::streampos got = buf.seekoff(off, std::ios_base::end, std::ios_base::in);
-    const long want = length + off; /* [stringbuf.virtuals] table 145, p11 */
+    const long want = length + off; /* [stringbuf.virtuals] table 131, p11 */
 
     if (want >= 0 && want <= length)
     {

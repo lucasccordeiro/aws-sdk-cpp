@@ -62,7 +62,7 @@ std::string SeekEnd(std::iostream &stream, std::streambuf &, std::streamoff off)
     return Observe(stream);
 }
 
-/* pubseekpos and pubseekoff default to in|out. [stringbuf.virtuals] table 144:
+/* pubseekpos and pubseekoff default to in|out. [stringbuf.virtuals] table 130 (N3337):
  * with both bits set and way == beg, both sequences are positioned. */
 std::string SeekPosBoth(std::iostream &stream, std::streambuf &buf, std::streamoff off)
 {
@@ -95,7 +95,7 @@ const Case CASES[] = {
     {SeekBeg, 5, "5", "seekg(5,beg) lands on the sixth"},
     {SeekEnd, 0, "EOF", "seekg(0,end) lands one past the last byte"},
 
-    {SeekEnd, -3, "7", "seekg(-3,end) lands three before the end: [stringbuf.virtuals] t.145"},
+    {SeekEnd, -3, "7", "seekg(-3,end) lands three before the end: [stringbuf.virtuals] t.131"},
     {SeekEnd, 3, "FAIL", "seekg(+3,end) is past the end and must fail"},
 
     {SeekPosBoth, 2, "2", "pubseekpos(2) positions the input sequence too: t.144"},

@@ -12,9 +12,17 @@
  * see ../streambuf/REPORT.md "Fidelity of the model".
  *
  *   $ esbmc --std c++11 --multi-property esbmc_bug_repros/om_streambuf_get_area.cpp
+ *   FAILED  [Ordered.same-object-violation.1]  Relational comparison between
+ *                                              pointers is only valid for
+ *                                              pointers to the same object
  *   FAILED  [main.assertion.1]  setg postcondition: gptr() == the gnext it was given
  *   FAILED  [main.assertion.2]  setg postcondition: gptr() <= egptr()
+ *   ** 3 of 9 properties failed
  *   VERIFICATION FAILED
+ *
+ * The same-object violation is the same gap from another side: gptr() and
+ * egptr() come back as unrelated unconstrained pointers, so comparing them is
+ * not a comparison within one object.
  *
  * Filed as esbmc/esbmc#7539.
  *

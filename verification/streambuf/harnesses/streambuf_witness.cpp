@@ -62,7 +62,7 @@ int Invariant()
     stream.get(one);
 
     printf("after underflow: gptr=%td egptr=%td pptr=%td\n", buf.GetOffset(), buf.GetAreaEnd(), buf.PutOffset());
-    printf("setg precondition [streambuf.get.area]/5 holds: %s\n", buf.GetOffset() <= buf.GetAreaEnd() ? "yes" : "no");
+    printf("get area well-formed, gptr <= egptr: %s\n", buf.GetOffset() <= buf.GetAreaEnd() ? "yes" : "no");
     return 0;
 }
 
@@ -80,7 +80,10 @@ int Stale()
     printf("read past the written data: %s", got ? "returned a byte" : "reported EOF");
     if (got)
     {
-        printf(" 0x%02x, which the application never wrote", static_cast<unsigned char>(one));
+        /* The payload is WRITTEN copies of 'A', so any other byte is one the
+         * application never wrote -- checked, not asserted in the message. */
+        printf(" 0x%02x, which the application %s", static_cast<unsigned char>(one),
+               one == 'A' ? "did write" : "never wrote");
     }
     printf("\n");
     return 0;
@@ -123,7 +126,7 @@ int Write()
     InterleaveWithWrite(stream);
 
     printf("after the write: gptr=%td egptr=%td pptr=%td\n", buf.GetOffset(), buf.GetAreaEnd(), buf.PutOffset());
-    printf("setg precondition [streambuf.get.area]/5 holds: %s\n", buf.GetOffset() <= buf.GetAreaEnd() ? "yes" : "no");
+    printf("get area well-formed, gptr <= egptr: %s\n", buf.GetOffset() <= buf.GetAreaEnd() ? "yes" : "no");
 
     char out[WRITTEN];
     stream.clear();
@@ -143,7 +146,7 @@ int Reference()
 
     char sink[WRITTEN];
     stream.read(sink, static_cast<std::streamsize>(WRITTEN));
-    printf("std::stringbuf on the same sequence: gcount=%ld, no diagnostic\n", static_cast<long>(stream.gcount()));
+    printf("std::stringbuf on the same sequence: gcount=%ld\n", static_cast<long>(stream.gcount()));
 
     std::stringbuf wbuf(std::ios_base::in | std::ios_base::out);
     std::iostream wstream(&wbuf);
@@ -151,7 +154,7 @@ int Reference()
     char out[WRITTEN];
     wstream.clear();
     wstream.read(out, static_cast<std::streamsize>(WRITTEN));
-    printf("std::stringbuf ending in a write: gcount=%ld, no diagnostic\n", static_cast<long>(wstream.gcount()));
+    printf("std::stringbuf ending in a write: gcount=%ld\n", static_cast<long>(wstream.gcount()));
     return 0;
 }
 } // namespace

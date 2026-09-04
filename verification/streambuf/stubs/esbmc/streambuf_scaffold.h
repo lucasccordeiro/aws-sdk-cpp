@@ -1,8 +1,9 @@
 /**
  * Verification-only scaffolding for the ESBMC leg: the two classes' declarations
  * and the state setup the harness needs, with nothing in the bodies of the five
- * functions under test -- reproduce.sh cuts those out of the pristine sources at
- * run time and appends them to this header's includer.
+ * functions under test -- reproduce.sh cuts those, and PreallocatedStreamBuf's
+ * constructor, out of the pristine sources at run time and appends the six
+ * blocks to this header's includer.
  *
  * Three things differ from the SDK headers, all of them here rather than in the
  * sliced bytes:

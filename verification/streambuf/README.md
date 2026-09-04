@@ -7,6 +7,11 @@ buffer `SimpleStreamBuf.h:21` says it replaces, `std::stringbuf`. Pinned here at
 **1.11.884** (`acb9a0a9bcc48065bcfa71c73240c34da8deccb9`), the current release on
 2026-09-02; `vendor/` holds both files unmodified.
 
+Paragraph and table numbers below are **C++11's (N3337)** — the standard the SDK
+targets and the one `reproduce.sh` passes to `--std`. They differ in every later
+revision: `[stringbuf.virtuals]`'s two tables are 130 and 131 here, 126 and 127
+in C++23, 144 and 145 in the working draft.
+
 **T-1 — a read after a backward `seekp` `memcpy`s a negative length.**
 Two call sites re-point the end of the get area at the put pointer without
 checking which is ahead — `underflow`:
@@ -20,15 +25,16 @@ if(egptr() != pptr())               // SimpleStreamBuf.cpp:219
 
 and `xsputn`, which ends every copy with the same unguarded call (`:197`). Once
 `seekp` has moved the put pointer back, `pptr()` is *behind* `gptr()`, and either
-site hands `setg` a `gnext` past its `gend` — which [streambuf.get.area]/5
-forbids. `std::basic_streambuf::xsgetn`, which this class does not override,
-then computes `egptr() - gptr()` as the available count and passes it to
-`memcpy`, whose third parameter is `size_t`:
+site hands `setg` a `gnext` past its `gend`. By `setg`'s postcondition
+([streambuf.get.area]/5) that leaves `gptr() > egptr()`, and
+`std::basic_streambuf::xsgetn`, which this class does not override, computes
+`egptr() - gptr()` as the available count and passes it to `memcpy`, whose third
+parameter is `size_t`:
 
 ```
 $ ./results/witness_ndebug invariant
 after underflow: gptr=51 egptr=10 pptr=10
-setg precondition [streambuf.get.area]/5 holds: no
+get area well-formed, gptr <= egptr: no
 
 $ ./results/witness_ndebug crash
 AddressSanitizer: negative-size-param: (size=-41)   in memcpy, via xsgetn
@@ -48,7 +54,7 @@ identically: nothing on this path asserts.
 
 **T-2 — end-relative seeks go the wrong way.** Both buffers *subtract* the
 offset (`SimpleStreamBuf.cpp:75`, `PreallocatedStreamBuf.cpp:33`) where
-[stringbuf.virtuals] table 145 and p11 add it. So the two meanings are
+[stringbuf.virtuals] table 131 and p11 add it. So the two meanings are
 exchanged:
 
 ```
@@ -60,15 +66,16 @@ seekg(+3, end)           FAIL             '7'                 '7'
 `seekg(-3, end)` — the idiomatic "last three bytes" — fails; in a **debug build
 it aborts**, at `seekpos`'s own `assert(static_cast<size_t>(pos) <= maxSeek)`.
 `seekg(+3, end)`, which is past the end and must fail, quietly lands inside the
-buffer. `seekg(0, end)` still works, because zero is its own negation — and that
-is the only end-relative seek the SDK performs on these buffers, which is how
-this has survived.
+buffer. `seekg(0, end)` still works, because zero is its own negation — and no
+in-SDK caller performs a *non-zero* end-relative seek on either buffer, which is
+how this has survived. Upstream's own tests do perform them, and pass only
+because the implementation subtracts; see "Upstream's tests encode T-2" below.
 
 **T-3 — a seek that reports success and moves nothing.** `which` is a bitmask,
 and `pubseekpos`/`pubseekoff` default it to `in | out`. Both buffers test it with
 `==` (`SimpleStreamBuf.cpp:101,106`, `PreallocatedStreamBuf.cpp:61,66`), so
 neither branch runs — and the function still returns the position, which means
-success. [stringbuf.virtuals] table 144 requires **both** sequences to be
+success. [stringbuf.virtuals] table 130 requires **both** sequences to be
 positioned in exactly this case. The SDK's own `EventStreamBuf.cpp:104` returns
 `-1` here, so this is a missing case rather than a house convention.
 
@@ -85,12 +92,12 @@ enumeration in [REPORT.md](REPORT.md) "Reachability".
 ## Run it
 
 ```sh
-./reproduce.sh          # 70 checks, ~1 min
+./reproduce.sh          # 73 checks, ~1 min
 ```
 
 Needs ESBMC 8.4.0 or 8.5.0 (Bitwuzla and Z3), a C++11 compiler and curl. Each leg
 also runs alone: `./reproduce.sh esbmc | sanitizer | tests | reachability | fix`.
-Set `CXX` to choose the compiler. Expect **70 passed, 0 failed**; a failure is
+Set `CXX` to choose the compiler. Expect **73 passed, 0 failed**; a failure is
 what would need explaining, and so is a skip — a leg that cannot run counts
 against the total rather than silently shrinking it.
 
@@ -105,10 +112,11 @@ against the total rather than silently shrinking it.
 ### ESBMC — proved over every offset, not sampled
 
 Every row agrees under **Bitwuzla and Z3**, and on **ESBMC 8.4.0 and 8.5.0**;
-each takes 2–6 s. Each is checked twice — once for the verdict, once for *which*
+each takes 1–6 s. Each is checked twice — once for the verdict, once for *which*
 property the verdict broke, since an unrelated memory-safety check would also
-print FAILED. The model's buffer is 8 bytes, so "every offset" below means every
-offset of a buffer that size.
+print FAILED. The model's buffer is 8 bytes and the symbolic offset ranges over
+`[-9, +9]`, one past each end of it, so "every offset" below means every offset
+of a buffer that size.
 
 | Property, over all inputs of the model | Semantics | Verdict |
 |---|---|---|
@@ -117,19 +125,19 @@ offset of a buffer that size.
 | The same, restricted to offsets inside the sequence | release | **FAILED** |
 | The same | **debug** | **FAILED** — stops at `SimpleStreamBuf.cpp:95`, the module's assert |
 | A successful `seekpos(pos, in\|out)` positioned both sequences | release | **FAILED** — `pos=0`, nothing moved |
-| `underflow` leaves `gptr <= egptr` | release | **FAILED** — `gptr=4, egptr=4, pptr=0` |
-| Both properties again, on `PreallocatedStreamBuf` | release | **FAILED** |
+| `underflow` leaves `gptr <= egptr` | release | **FAILED** — enters `gptr=4 egptr=4 pptr=0`, exits `gptr=4 egptr=0` |
+| Both properties again, on `PreallocatedStreamBuf` | release | **FAILED** — `length=8, off=+7`; `length=8, pos=1` |
 
 The control matters twice over. Fix the offset at zero and the same property
 verifies, so the failures are not a harness that fails for everything — and
 deleting a function body from the slice flips that row from SUCCESSFUL to FAILED,
 so it also catches a slice that silently lost the code under test.
 
-The `underflow` row assumes `gptr <= egptr` on entry — what `setg`'s own
-precondition guarantees of any state the class built. That is necessary for a
-reachable state rather than sufficient, so the row reports that the module can
-turn a well-formed get area into a malformed one; the native witness is what
-shows it reaching that state from public calls.
+The `underflow` row assumes `gptr <= egptr` on entry — the invariant every get
+area the class builds actually satisfies. That is necessary for a reachable state
+rather than sufficient, so the row reports that the module can turn a well-formed
+get area into a malformed one; the native witness is what shows it reaching that
+state from public calls.
 
 Release semantics is `-D NDEBUG`, the macro state of an actual release build, not
 ESBMC's `--no-assertions`: that flag also drops `__ESBMC_assert`, so the harness
@@ -179,8 +187,8 @@ implementation subtracts, and a fix has to update them.
 ## Fix
 
 `fix/streambuf-seek-and-get-area.patch` — ten hunks across the two files: the
-sign on the end-relative branch, `&` instead of `==` on `which`, the two cases
-table 144 says must fail, and
+sign on the end-relative branch, `&` instead of `==` on `which` in `seekpos`,
+the two cases table 130 says must fail, and
 
 ```cpp
 -    if(egptr() != pptr())
@@ -194,6 +202,11 @@ leaves the identical `memcpy` reachable by ending the sequence with a write, so
 the fix leg checks both. After the patch, all six ESBMC properties verify under
 both solvers and both ESBMC versions, all 21 contract rows pass, and both witness
 sequences return what `std::stringbuf` returns.
+
+`seekoff`'s `cur` branch keeps its `==`, so `pubseekoff(0, cur, in|out)` still
+answers `-1` where table 130 asks for a position. Nothing reaches it —
+`seekg`/`seekp`/`tellg`/`tellp` all pass exactly one bit — and it is listed in
+[REPORT.md](REPORT.md) "What the patch does not do" rather than fixed here.
 
 What it deliberately leaves alone: `seekpos` still aborts a debug build for a
 seek that really is out of range, instead of returning `-1` as the API requires.

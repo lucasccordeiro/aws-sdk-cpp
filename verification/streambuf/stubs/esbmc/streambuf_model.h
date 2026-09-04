@@ -13,11 +13,11 @@
  * int rather than the 64-bit type the SDK's signatures are written against.
  *
  * What it promises. The bodies below are the postconditions the standard states
- * for these members -- [streambuf.get.area]/5-6 for setg, [streambuf.put.area]/3
- * for setp -- and nothing else. They deliberately do not enforce setg's
- * precondition: whether the SDK's code can break it is the question the
- * GET_AREA mode asks, and a stand-in that asserted it would answer that question
- * by construction instead of measuring it.
+ * for these members -- [streambuf.get.area]/5 for setg, [streambuf.put.area]/5
+ * for setp, both N3337 -- and nothing else. In particular they let setg record a
+ * gnext past gend: whether the SDK's code produces that state is the question
+ * the GET_AREA mode asks, and a stand-in that rejected it would answer the
+ * question by construction instead of measuring it.
  */
 
 #ifndef VERIFICATION_STREAMBUF_MODEL_H
