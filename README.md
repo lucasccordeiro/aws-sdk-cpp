@@ -73,8 +73,13 @@ kept literal is read back with `atoll`, which stops at the exponent — so
 exactly. That last one is a regression, first shipped in 1.11.660: before it the
 literal was not kept for exponent forms at all, and the same body read back
 correctly. Generated deserializers reach the last two on every `int64` field, with
-no logging and no application involvement. A patch and
-the proofs are in [verification/cjson/](verification/cjson/).
+no logging and no application involvement. ESBMC finds all three
+from symbolic input alone — each stated as a property with the length, the
+double, the mantissa and the exponent left free, and no triggering value named —
+and its test-case generator then names a concrete value in each region of every
+defect's condition, which the suite runs against the pristine SDK under the
+sanitizers. A patch and the proofs are in
+[verification/cjson/](verification/cjson/).
 
 A short public write-up of the exercise was
 [posted on 2026-08-13](https://www.linkedin.com/posts/lucas-cordeiro-3156233_formalverification-memorysafety-esbmc-share-7493503595426963457-OZeH/),

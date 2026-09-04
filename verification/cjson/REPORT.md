@@ -1,4 +1,4 @@
-# ESBMC, libFuzzer and sanitizers vs. the SDK's JSON number path — findings
+# ESBMC vs. the SDK's JSON number path — findings
 
 **Target:** `aws/aws-sdk-cpp` @ `31583cee6ed69015a7e63fefae5b931ae9f3196e`
 (v1.11.886, the current release at the time of writing)
@@ -9,8 +9,11 @@ C++ accessors layered over it:
 `Aws::Utils::Json::JsonView::{GetInt64,AsInt64,IsIntegerType,IsFloatingPointType,WriteCompact,WriteReadable}`
 (`.../source/utils/json/JsonSerializer.cpp:491-517,629-657,669-701`) and the
 identical members of `Aws::Utils::DocumentView` (`.../source/utils/Document.cpp`)
-**Cross-check:** GCC and clang with AddressSanitizer and UBSan, libFuzzer over
-the parser, and ESBMC 8.5.0 under both Bitwuzla and Z3
+**Method:** ESBMC 8.5.0 under both Bitwuzla and Z3 states each defect as a
+property over symbolic input and refutes it; its test-case generator turns the
+counterexamples into executable tests; those run against the pristine sources
+under GCC and clang with AddressSanitizer and UBSan. libFuzzer covers the parser
+separately.
 **Status:** three defects, all on the path a **service response body** takes into
 an application, one of them a **regression first shipped in 1.11.660**. The
 parser itself is not one of them: 595k libFuzzer executions over parse / print /
@@ -34,12 +37,172 @@ wire-controlled, unbounded-length string on a field the printer assumes is short
 |---|--------|--------|---------|
 | **J-1** | `WriteCompact`/`WriteReadable` build `Aws::String` from whatever `cJSON_AS4CPP_Print*` returns, with no null check (`JsonSerializer.cpp:680,697`; `Document.cpp:655,668`) — and `print_number`'s 26-byte buffer cannot hold a longer literal, so the whole document fails to print | `std::logic_error`, **process abort** (exit 134) | a response number of 26 or more characters, written without a decimal point |
 | **J-2** | `static_cast<long long>(valuedouble)` with no range check, at four sites in each of the two files (`JsonSerializer.cpp:502,515,641,656`; `Document.cpp:492,506,519,549`) | undefined behaviour, [conv.fpint]/1; in practice a garbage value — `INT64_MIN` on x86-64 | any response number outside the `int64` range written with a decimal point, e.g. `1.5e300`, or `inf` from `1.0e999` |
-| **J-3** | the kept literal is read with `std::atoll` (`StringUtils.cpp:337-349`), which stops at the exponent and is undefined on overflow (C 7.22.1.2p3) | **`{"n":5e9}` reads back as `5`**, since 1.11.660 | any integer written in exponent form, in range or not |
+| **J-3** | the kept literal is read with `std::atoll` (`StringUtils.cpp:337-349`), which stops at the exponent and is undefined on overflow (C11 7.22.1p1) | **`{"n":5e9}` reads back as `5`**, since 1.11.660 | any integer written in exponent form, in range or not |
 
 J-1 aborts. J-2 and J-3 are wrong answers, one of them undefined.
 
 The three are independent, and none of them needs a malformed document: every
 input below is well-formed JSON that a service is free to return.
+
+## ESBMC finds all three, from symbolic input alone
+
+Each defect is stated as a property over symbolic input and handed to ESBMC. No
+harness names a triggering value — the length, the double, the mantissa and the
+exponent are all free — so the concrete numbers below are the solver's, not ours.
+Every row is run under both Bitwuzla and Z3, and agreement is required.
+
+| Harness | Property | Free variable | Verdict |
+|---|---|---|---|
+| `json_print_esbmc.cpp` | J-1 — the pointer `Aws::String` receives is not null | the literal's length, 1..40 | **FAILED** |
+| `json_print_esbmc.cpp -D BOUNDED` | the same, for 25 characters or fewer | length, 1..25 | SUCCESSFUL |
+| `json_number_esbmc.cpp` | J-2 — [conv.fpint]/1: the double is representable as `long long` | the `double`, any non-NaN | **FAILED** |
+| `json_literal_esbmc.cpp` | J-3 — the accessor returns the value the kept literal denotes | mantissa 1..9, exponent 1..18 | **FAILED** |
+| `-D FIXED`, all three | the patched code satisfies each property | as above | SUCCESSFUL |
+
+No witness is quoted in that table on purpose. The two solvers agree on the
+verdict, which is what the suite asserts, and not on the violating input, which
+it never does — that is the solver's own choice and varies with the encoding and
+between runs. Concrete values belong to the next section, where the generator is
+asked for one per region and the suite pins the *behaviour* each produces.
+
+`-D BOUNDED` is the row that makes J-1's boundary a boundary rather than a
+complaint: without it, a printer that rejected *every* literal would satisfy the
+FAILED row just as well. Shrinking the modelled buffer from 26 bytes to 20 breaks
+it, so it is not decoration.
+
+### Configuration, and why each flag is there
+
+| Flag | Why |
+|---|---|
+| `--std c++11` | the SDK's baseline, and the revision every paragraph number in this document is quoted from (N3337) |
+| `--z3` / `--bitwuzla` | every row is run under both; agreement is required |
+| `--unwind 45` (J-1) | clears the longest literal the harness can build, so every unwinding assertion is reported PASSED |
+| `--unwind 10 --array-flattener` (J-3) | `atoll`'s digit map is a 256-entry array indexed by a symbolic character. Under Z3's array theory that row takes over two minutes; flattened, seven seconds. Bitwuzla is fast either way and agrees with both encodings. |
+| `-D FIXED` | selects the patched code, for the second half of each pair |
+
+### What ESBMC supplies, and what had to be transcribed
+
+The J-3 harness calls `atoll` and lets ESBMC supply it, from
+`src/c2goto/library/stdlib.c`'s `ATOI_DEF` — C11 7.22.1.2p2's "equivalent to
+`strtoll(nptr, NULL, 10)`", stopping at the first character that cannot continue
+the subject sequence (7.22.1.4p4). That last clause *is* J-3, so the defect is
+found in the library model rather than asserted by us. The patched row likewise
+uses ESBMC's own `strtoll`, including its saturation.
+
+The other two harnesses transcribe the code under analysis, for reasons worth
+recording because they are limitations of the tool rather than choices:
+
+* **ESBMC 8.5.0 does not finish on the vendored `cJSON.cpp`.** Its `memset` and
+  `memcpy` models unwind once per byte, and `print`'s 256-byte buffer alone puts
+  the run past any bound this suite could wait for — measured: no verdict in
+  110 s at `--unwind` 32, 40 or 70, on a harness that only prints one object.
+* **Passing `cJSON.cpp` as a second C++ translation unit is worse than slow.**
+  The frontend drops its function bodies without a diagnostic; a call to
+  `cJSON_AS4CPP_Parse` then returns nondeterministically, and *every* property
+  "fails" for a reason that has nothing to do with the code. `esbmc a.cpp b.cpp`
+  links correctly on a two-file toy, so this is specific to something in this
+  file — but the silence is the hazard. A run that fails for this reason looks
+  exactly like a run that found a defect.
+* **ESBMC's `snprintf` model does not return the length it would have written**
+  (C11 7.21.6.5p3). `print_number`'s guard is written against that return value,
+  so the harness substitutes `strlen`, which is what the standard defines the
+  call to return here.
+* **ESBMC's C++ frontend rejects `StringUtils.cpp`** — its `std::string`
+  operational model has no `rbegin`/`rend`, and `::isspace` is not in the global
+  namespace. `ConvertToInt64`'s body is one line, quoted in the harness, and its
+  callee analysed directly.
+* **An out-of-range floating-point to integer conversion is not one of ESBMC's
+  checks.** `esbmc bare_conversion.c --overflow-check --nan-check` reports
+  `VERIFICATION SUCCESSFUL` on a bare `(long long)1e300`, so the J-2 harness
+  states [conv.fpint]/1's precondition itself. The suite runs that case as a
+  check of its own, so the day ESBMC gains the check, the row fails and this
+  bullet gets deleted.
+
+So the honest summary of the modelling: J-3's defect is found in code ESBMC
+supplies; J-1's and J-2's are found in a transcription of the SDK's own
+statements, quoted line by line in the harness headers. The gap that closes is
+the next section — the counterexamples are executed against the real accessors,
+which is where a transcription that lied would show up.
+
+### The `-D FIXED` rows are about a restatement of the patch
+
+The same gap runs the other way, and the counterexamples do not close it. None of
+the four modules is in a harness's translation unit, so a `-D FIXED` row says the
+patched *logic* satisfies the property, not that the shipped patch does. One row
+narrows that by a level: `-D FIXED -D EQUIVALENCE` carries a hand-transcription of
+the patch's `ToInt64Saturating` — `long long` for `int64_t`, integer literals for
+`std::numeric_limits` — beside the model and asserts the two agree for every
+non-NaN double. Mutating *that copy* breaks the row; mutating the copy the patch
+actually ships does not, because nothing feeds `fix/` to ESBMC. What catches a
+mutation of the shipped helper is the native fix leg, which builds the patched
+tree and checks its answers, and the counterexample replays, which link the
+patched modules. `LiteralToInt64` and the `cJSON.cpp` hunk are covered by those
+two alone.
+
+## Executable counterexamples, run against the SDK
+
+A `VERIFICATION FAILED` verdict says a violating input exists; it does not hand
+anyone a test they can run. ESBMC's test-case generation does
+([docs](https://esbmc.github.io/docs/c-cpp/ctest-gen/)):
+
+```sh
+esbmc harnesses/json_print_ctest.cpp --std c++11 --branch-coverage \
+      --generate-ctest-testcase --ctest-output-dir results/esbmc-ctest-print
+```
+
+Each `*_ctest.cpp` splits its harness's input into the regions the defect's
+condition distinguishes, so covering every branch forces the solver to name a
+concrete value in each. All three report `Branch Coverage: 100%` and write
+`test_case_N.cpp`, each a compilable `__VERIFIER_nondet_*` body.
+
+The generated `CMakeLists.txt` would rebuild the *harness* with those values,
+which only re-runs the model. Each `*_replay.cpp` links the generated
+`__VERIFIER_nondet_*` against the **real** `JsonSerializer.cpp` and
+`Document.cpp` instead, renders the value as a response body and reads it back
+the way a generated deserializer does — under ASan and UBSan. On our runs:
+
+| Defect | Witness ESBMC chose | Region | On the pristine SDK |
+|---|---|---|---|
+| J-1 | 28 digits | past the printer's buffer | **SIGABRT** — `basic_string: construction from null is not valid` |
+| J-1 | 10 digits | inside it | round-trips |
+| J-2 | `9.2233720368547759e+18` (2^63) | above the range | undefined — `:502`, `:515`, `:641`, `:656`, `Document.cpp:519` |
+| J-2 | `1.0261342003245943e-289` | representable | defined; reads back as `0` |
+| J-2 | `-1.8446744073709555e+19` (≈ −2^64) | below the range | undefined — the same sites |
+| J-3 | `4e11` | the parser keeps the literal | **reads back as `4`** |
+| J-3 | `4e3` | in exponent form, but too small to keep a literal | exact |
+| J-3 | `4` | no exponent | exact |
+
+ESBMC picked 2^63 for J-2 with nothing to go on but the branch condition — the
+same boundary the hand analysis below arrives at, reached independently. Under
+the patch all eight are clean, and the suite checks that as presence of an
+answer rather than absence of a crash: both J-1 witnesses print their document
+back, all three J-2 witnesses read a value with no sanitizer diagnostic, and all
+three J-3 witnesses read back exactly.
+
+Two guards keep the replays honest. The J-2 driver checks that its rendered text
+parses back bit-identical to the double the solver chose before trusting the
+replay — rendering with `%.6g` instead makes that check fire. The J-3 driver
+recomputes the expected value from the mantissa and exponent itself rather than
+taking it from the harness, so the two arrive at it independently. Which witness
+lands in which region is the solver's choice, so each leg counts outcomes rather
+than assuming an order.
+
+**Scope.** This is all three defects, executed. What it is not is a proof about
+the parser: every harness starts from the value or the literal `parse_number`
+produces, and takes for granted that a response body can produce it. The native
+witness table below closes that by going in through `JsonValue`'s string
+constructor, and the fuzz leg covers the parser itself.
+
+---
+
+## The three defects in detail
+
+What follows is each defect on its own terms — the code, the standard's words,
+and the fifteen-body witness table that the `sanitizer` leg runs over both
+accessors. It is the same three findings the two sections above state and refute.
+The inputs here were chosen by hand rather than by the solver, and go further
+into each defect's behaviour than a counterexample needs to; where the two
+coincide, as they do at 2^63, they were arrived at independently.
 
 ## J-1 — a response number can abort the process
 
@@ -181,7 +344,8 @@ long long StringUtils::ConvertToInt64(const char* source)
 ```
 
 Two problems on a literal that came off the wire. `atoll` is undefined if the
-value is not representable (C 7.22.1.2p3) — a 26-digit literal is not. And it
+value is not representable (C11 7.22.1p1, "If the value of the result cannot be
+represented, the behavior is undefined") — a 26-digit literal is not. And it
 stops at the first character that cannot continue a decimal integer, which for
 `1e300` is the `e`: the mantissa is returned and the exponent is silently
 dropped.
@@ -252,99 +416,6 @@ The same change reshapes J-2 rather than causing it: at 1.11.659 `{"n":1e300}`
 had no literal either, so it reached the unguarded conversion and was undefined
 (observed `INT64_MIN`); at 1.11.886 it takes the literal path and reads `1`. The
 defect moved, it did not close.
-
-## Symbolic confirmation (ESBMC)
-
-### Configuration, and why each flag is there
-
-| Flag | Why |
-|---|---|
-| `--std c++11` | the SDK's baseline, and the revision every paragraph number in this document is quoted from (N3337) |
-| `--z3` / `--bitwuzla` | every row is run under both; agreement is required |
-| `-D FIXED` | selects the patched conversion, for the second half of the pair |
-
-Input model: `valuedouble` is a symbolic `double`, constrained only by
-`__ESBMC_assume(d == d)` — JSON's grammar has no NaN literal, but it can spell
-an infinity, as an exponent that overflows. Properties are stated with
-`__ESBMC_assert` (`harnesses/json_number_esbmc.cpp`).
-
-**Why the property is stated rather than inferred.** An out-of-range
-floating-point to integer conversion is not one of ESBMC's checks:
-`esbmc bare_conversion.c --overflow-check --nan-check` reports
-`VERIFICATION SUCCESSFUL` on a bare `(long long)1e300`. The suite runs that case
-as a check of its own, so the day ESBMC gains the check, the row fails and this
-paragraph gets deleted. Reported upstream separately.
-
-### Results
-
-| Harness | Property | Verdict |
-|---|---|---|
-| pristine | `[conv.fpint]` the double is representable as `long long` | **FAILED** — Z3 and Bitwuzla |
-| `-D FIXED` | the guard implies that precondition | SUCCESSFUL — Z3 and Bitwuzla |
-| `-D FIXED` | below the range, saturates low | SUCCESSFUL — Z3 and Bitwuzla |
-| `-D FIXED` | above the range, saturates high | SUCCESSFUL — Z3 and Bitwuzla |
-| `-D FIXED -D EQUIVALENCE` | the patch's own `ToInt64Saturating` agrees with the model above, for every non-NaN double | SUCCESSFUL — Z3 and Bitwuzla |
-| `--branch-coverage --generate-ctest-testcase` | one executable witness per region of the conversion | 100% branch coverage, 3 test cases |
-
-### Fidelity of the model
-
-The harness reasons about the conversion, not about `strtod`: it takes
-`valuedouble` as an arbitrary double rather than deriving it from a literal.
-That is the right abstraction for J-2 — the conversion's precondition depends on
-the value and nothing else — and it is *not* a proof about the parser, which is
-covered by the fuzz leg instead.
-
-The other gap is transcription, and it is **not** closed here. `JsonSerializer.cpp`
-is not in the harness's translation unit, so the `-D FIXED` rows are about a
-restatement of the fix rather than the fix itself. The `EQUIVALENCE` row narrows
-that to one level: it carries a hand-transcription of the patch's
-`ToInt64Saturating` — `long long` for `int64_t`, integer literals for
-`std::numeric_limits` — beside the model and asserts the two agree for every
-non-NaN double. Mutating *that copy* breaks the row; mutating the copy the patch
-actually ships does not, because nothing feeds the patch to ESBMC. What catches a
-mutation of the shipped helper is the native fix leg, which builds the patched
-tree and checks its answers. `LiteralToInt64` is likewise covered only by the
-native witness.
-
-### Executable counterexamples
-
-A `VERIFICATION FAILED` verdict says a violating double exists; it does not hand
-anyone a test they can run. ESBMC's test-case generation does
-([docs](https://esbmc.github.io/docs/c-cpp/ctest-gen/)):
-
-```sh
-esbmc harnesses/json_number_ctest.cpp --std c++11 --branch-coverage \
-      --generate-ctest-testcase --ctest-output-dir results/esbmc-ctest
-```
-
-`json_number_ctest.cpp` splits the conversion's input into the three regions its
-precondition distinguishes, so covering every branch forces the solver to name a
-concrete double in each. It reports `Branch Coverage: 100%` and writes
-`test_case_N.cpp`, each a compilable `__VERIFIER_nondet_double()` returning one
-witness. On our runs:
-
-| Witness | Region | On the pristine accessors |
-|---|---|---|
-| `9.2233720368547759e+18` (2^63) | above the range | undefined — `:502`, `:515`, `:641`, `:656`, and `Document.cpp:519` |
-| `1.0261342003245943e-289` | representable | defined; reads back as `0` |
-| `-1.8446744073709555e+19` (≈ −2^64) | below the range | undefined — the same sites |
-
-The generated `CMakeLists.txt` would rebuild the harness with those values, which
-only re-runs the model. `harnesses/json_number_replay.cpp` links the generated
-`__VERIFIER_nondet_double()` against the **real** `JsonSerializer.cpp` and
-`Document.cpp` instead, renders the double as `{"n":%.17g}` and reads it back the
-way a generated deserializer does — so the counterexample is executed against the
-SDK. The driver checks that the rendered text parses back bit-identical before
-trusting the replay; rendering with `%.6g` instead makes that check fire.
-
-Under the patch all three are clean and saturate correctly. Which witness lands
-in which region is the solver's choice, so the leg counts outcomes — two
-undefined, one defined — rather than assuming an order.
-
-**Scope.** This witnesses J-2, whose precondition is a property of the *value*.
-J-1 and J-3 are properties of the literal *text* — its length, and whether it
-carries an exponent — which a double-valued model cannot express; those are
-covered by the native witness instead.
 
 ## Fuzzing — where the defects are not
 
@@ -544,13 +615,22 @@ printer error, not J-1 itself.
 - **The fuzzing bound is a bound.** 595k executions over one entry point is not a
   proof of the parser's memory safety; it is the reason this report does not
   claim a defect there.
+- **The proofs are bounded, and they are about models.** Each ESBMC row holds
+  over the range its harness constrains — a literal of at most 40 characters, an
+  exponent of at most 18 — not over every input a response can carry. And with
+  the exception of J-3's `atoll`, which ESBMC supplies, the code each row reasons
+  about is a transcription of the SDK's statements rather than the SDK's own
+  translation units; the reasons are in *What ESBMC supplies, and what had to be
+  transcribed*. The executed counterexamples are what makes the transcriptions
+  answerable: those run against the real modules.
 
 ## Reproducing
 
 ```sh
-./reproduce.sh              # 76 checks, ~35 s
-./reproduce.sh sanitizer    # or one leg at a time: sanitizer, esbmc, ctest,
-                            # fuzz, delta, reachability, fix
+./reproduce.sh              # 106 checks, ~2 min 45 s
+./reproduce.sh esbmc        # or one leg at a time, in the order they run:
+                            # esbmc, ctest, sanitizer, fuzz, delta,
+                            # reachability, fix
 ```
 
 Everything the sanitizers, ESBMC and libFuzzer analyse is byte-for-byte upstream

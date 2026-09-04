@@ -69,7 +69,7 @@
 +        return static_cast<int64_t>(value);
 +    }
 +
-+    /* strtoll saturates an out-of-range literal itself (C 7.22.1.4p8), so its
++    /* strtoll saturates an out-of-range literal itself (C11 7.22.1.4p8), so its
 +     * answer stands whenever it consumed the whole literal. It stops at the 'e'
 +     * of an exponent form, and 5e9 must not read back as 5. */
 +    int64_t LiteralToInt64(const char* literal, double valuedouble)
@@ -201,7 +201,7 @@
 +        return static_cast<int64_t>(value);
 +    }
 +
-+    /* strtoll saturates an out-of-range literal itself (C 7.22.1.4p8), so its
++    /* strtoll saturates an out-of-range literal itself (C11 7.22.1.4p8), so its
 +     * answer stands whenever it consumed the whole literal. It stops at the 'e'
 +     * of an exponent form, and 5e9 must not read back as 5. */
 +    int64_t LiteralToInt64(const char* literal, double valuedouble)
@@ -301,7 +301,7 @@
 -#else
 -    return std::atoll(source);
 -#endif // __ANDROID__
-+    /* atoll is undefined if the value is not representable (C 7.22.1.2p3);
++    /* atoll is undefined if the value is not representable (C11 7.22.1p1);
 +       strtoll saturates. Reached with a JSON literal via JsonView::AsInt64. */
 +    return std::strtoll(source, nullptr, 10);
  }
