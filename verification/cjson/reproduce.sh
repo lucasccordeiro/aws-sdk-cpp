@@ -24,6 +24,8 @@ CORE=src/aws-cpp-sdk-core
 # Pins the size of the evidence tree, so a vanished vendor/ fails loudly instead
 # of passing a drift check it never ran.
 VENDORED_FILES=25
+# Pins the content of the normalised fork-vs-upstream diff, not just its size.
+DELTA_SHA=22dff753a93bc9b6
 CXX=${CXX:-g++}
 INCLUDES="-Istubs -Ivendor/include"
 STUBS="stubs/aws_memory_stub.cpp stubs/aws_logging_link_stub.cpp"
@@ -39,6 +41,13 @@ pass=0 fail=0 skip=0
 skip() { printf '  SKIP  %s\n' "$1"; skip=$((skip + 1)); }
 check() { # check <name> <expected-substring> <actual>
   if [[ "$3" == *"$2"* ]]; then printf '  PASS  %s\n' "$1"; pass=$((pass + 1))
+  else printf '  FAIL  %s\n        wanted: %s\n        got: %s\n' "$1" "$2" "$3"; fail=$((fail + 1)); fi
+}
+
+# check() matches a substring, which is what the message rows want and what the
+# numeric rows must not have: "0" is a substring of every status from 10 to 130.
+eq() { # eq <name> <expected> <actual>
+  if [[ "$3" == "$2" ]]; then printf '  PASS  %s\n' "$1"; pass=$((pass + 1))
   else printf '  FAIL  %s\n        wanted: %s\n        got: %s\n' "$1" "$2" "$3"; fail=$((fail + 1)); fi
 }
 
@@ -99,6 +108,13 @@ leg_sanitizer() {
   check "J-3: 1e300 reads back as 1"                   "AsInt64=1"                   "$exp"
   check "with nothing to warn about -- it is a wrong answer, not UB" "diagnostics=0" "diagnostics=$(san_count "$exp")"
 
+  # The same defect on a value int64 can hold exactly, which is the form that
+  # makes it a corruption rather than a precision complaint.
+  local inrange; inrange=$(./results/witness 6 2>&1)
+  check "J-3: 5e9 reads back as 5"                     "AsInt64=5 "                  "$inrange"
+  check "and GetInt64 agrees, which is what generated code calls" "GetInt64=5 "      "$inrange"
+  check "while the document still prints it in full"   'round-trip: {"n":5e9}'       "$inrange"
+
   # J-2: the same number written with a decimal point takes the double path.
   local dot; dot=$(./results/witness 3 2>&1)
   check "J-2: AsInt64 converts out of range"           "JsonSerializer.cpp:515"      "$dot"
@@ -112,13 +128,14 @@ leg_sanitizer() {
   local big; big=$(./results/witness 5 2>&1)
   check "J-1: the value is read before the write fails" "AsInt64=9223372036854775807" "$big"
   check "J-1: and the write builds a string from null" "construction from null"      "$big"
-  check "J-1: which aborts the process"                "134"                          "$(status_of ./results/witness 5)"
+  eq    "J-1: which aborts the process"                "134"                          "$(status_of ./results/witness 5)"
 
   # Document carries its own copy of all six sites.
   local doc; doc=$(./results/witness document 3 2>&1)
   check "J-2 again in Document::IsIntegerType"         "Document.cpp:492"            "$doc"
   check "J-2 again in Document::AsInt64"               "Document.cpp:519"            "$doc"
-  check "J-1 again in Document::WriteCompact"          "134"                          "$(status_of ./results/witness document 5)"
+  check "and in Document::IsFloatingPointType"         "Document.cpp:549"            "$doc"
+  eq    "J-1 again in Document::WriteCompact"          "134"                          "$(status_of ./results/witness document 5)"
 }
 
 leg_esbmc() {
@@ -179,9 +196,12 @@ leg_delta() {
   # The feature the defects grow from, and its absence upstream.
   check "the fork keeps a big integer's literal" "item->valuestring = (char*)cJSON_AS4CPP_strdup(number_c_string" \
     "$(grep -m1 'strdup(number_c_string' "$fork")"
-  check "upstream keeps no literal at all"       "none" \
-    "$(grep -c 'valuestring' <(sed -n '/static cJSON_bool parse_number/,/^}/p' "$ref") |
-       sed 's/^0$/none/')"
+  # Asserting the extracted range as well as the hit count: grep -c prints 0 on
+  # empty input, so a sed range that selects nothing would otherwise read as
+  # "upstream has no literal" and pass.
+  local upstream_parse; upstream_parse=$(sed -n '/static cJSON_bool parse_number/,/^}/p' "$ref")
+  eq "upstream keeps no literal at all" "102 lines, 0 hits" \
+    "$(wc -l <<<"$upstream_parse") lines, $(grep -c 'valuestring' <<<"$upstream_parse") hits"
   check "and the fork prints through it"         "if (item->valuestring)" \
     "$(sed -n '/static cJSON_AS4CPP_bool print_number/,/^}/p' "$fork" | grep -m1 'item->valuestring')"
 
@@ -197,7 +217,13 @@ leg_delta() {
   # future drift has to be looked at rather than absorbed.
   local delta; delta=$(sed -e 's/cJSON_AS4CPP_/cJSON_/g' -e 's/CJSON_AS4CPP_/CJSON_/g' "$fork" |
     diff -u "$ref" - | grep -c '^[-+][^-+]')
-  check "the whole delta is 101 changed lines" "101" "$delta"
+  eq "the whole delta is 101 changed lines" "101" "$delta"
+  # The count alone would not notice a bounded write swapped for an unbounded one
+  # in the same number of lines, and "no memory-safety drift" is the claim resting
+  # on this leg. Pinning the content means any drift has to be re-read by hand.
+  eq "and it is the delta that was read line by line" "$DELTA_SHA" \
+    "$(sed -e 's/cJSON_AS4CPP_/cJSON_/g' -e 's/CJSON_AS4CPP_/CJSON_/g' "$fork" |
+       diff -u "$ref" - | grep '^[-+][^-+]' | sha256sum | cut -c1-16)"
 }
 
 leg_reachability() {
@@ -256,7 +282,10 @@ leg_fix() {
   ( cd "$tree" && patch -p1 --quiet < "$OLDPWD/fix/json-number-range-and-print.patch" ) || {
     printf '  FAIL  the patch does not apply to %s\n' "$UPSTREAM_VERSION"; fail=$((fail + 1))
     rm -rf "$tree"; return; }
-  check "the patch applies to $UPSTREAM_VERSION" "applied" "applied"
+  eq "the patch changes all four modules" "4 changed" \
+    "$(local n=0; for rel in source/external/cjson/cJSON.cpp source/utils/json/JsonSerializer.cpp \
+         source/utils/Document.cpp source/utils/StringUtils.cpp; do
+         cmp -s "vendor/$rel" "$tree/$CORE/$rel" || n=$((n + 1)); done; printf '%d changed' "$n")"
 
   build results/witness_fixed harnesses/json_number_witness.cpp \
     "$tree/$CORE/source/utils/json/JsonSerializer.cpp" \
@@ -265,13 +294,17 @@ leg_fix() {
     "$tree/$CORE/source/external/cjson/cJSON.cpp" $STUBS $SAN || { rm -rf "$tree"; return; }
 
   local i out all_clean=0
-  for i in 0 1 2 3 4 5; do
+  for i in 0 1 2 3 4 5 6; do
     out=$(./results/witness_fixed $i 2>&1)
     all_clean=$((all_clean + $(san_count "$out")))
   done
   check "no case leaves a sanitizer diagnostic behind" "diagnostics=0" "diagnostics=$all_clean"
-  check "and none of them aborts"                      "0"             "$(status_of ./results/witness_fixed 5)"
+  eq    "and none of them aborts"                      "0"             "$(status_of ./results/witness_fixed 5)"
 
+  check "an overflowing exponent saturates instead of converting" \
+    "AsInt64=9223372036854775807" "$(./results/witness_fixed 4 2>&1)"
+  check "and 5e9 reads back as five billion" "AsInt64=5000000000" \
+    "$(./results/witness_fixed 6 2>&1)"
   local control; control=$(./results/witness_fixed 0 2>&1)
   check "in-range values are untouched"     "AsInt64=42"                  "$control"
   check "so is the largest int64"           "AsInt64=9223372036854775807" "$(./results/witness_fixed 1 2>&1)"
@@ -289,6 +322,8 @@ leg_fix() {
   command -v esbmc >/dev/null || { skip "esbmc not on PATH"; return; }
   both_solvers "the guarded conversion holds for every double" "VERIFICATION SUCCESSFUL" \
     harnesses/json_number_esbmc.cpp -D FIXED
+  both_solvers "and the shipped helper is the one proved" "VERIFICATION SUCCESSFUL" \
+    harnesses/json_number_esbmc.cpp -D FIXED -D EQUIVALENCE
 }
 
 case "${1:-all}" in

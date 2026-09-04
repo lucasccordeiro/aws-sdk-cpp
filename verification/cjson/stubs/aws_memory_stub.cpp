@@ -4,9 +4,10 @@
  * system) configuration a stock SDK build runs with -- Malloc/Free fall through
  * to plain malloc/free (AWSMemory.cpp:130-174 when GetMemorySystem() is null).
  *
- * Raw malloc/free is also what makes the ASan cross-check meaningful: the buffer
- * SimpleStreamBuf grows here is a real heap allocation with real redzones, so a
- * read that runs off it is caught rather than landing in slack.
+ * Raw malloc/free is also what makes the ASan cross-check meaningful: the
+ * literal parse_number strdups, and the buffer print_number's `ensure` grows,
+ * are real heap allocations with real redzones, so a read or write that runs
+ * off one is caught rather than landing in slack.
  */
 
 #include <cstdlib>

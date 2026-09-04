@@ -13,7 +13,7 @@
  * here as the property, at the site, rather than left to the tool to infer.
  *
  * valuedouble is whatever strtod returned for the literal in the response
- * (cJSON.cpp:386), so the only values excluded below are the ones JSON's
+ * (cJSON.cpp:388), so the only values excluded below are the ones JSON's
  * grammar cannot spell: it has no NaN literal. Infinity it can spell, as an
  * exponent that overflows -- {"n":1.0e999}.
  */
@@ -38,6 +38,28 @@ static long long convert(double valuedouble)
     return static_cast<long long>(valuedouble);
 }
 
+#ifdef EQUIVALENCE
+/* The patch's own helper, copied from fix/json-number-range-and-print.patch.
+ * `convert` above is a transcription of what the fix does; this pins the two
+ * together, so a proof about the model is a proof about the shipped code. */
+static long long ToInt64Saturating(double value)
+{
+    if (value != value)
+    {
+        return 0;
+    }
+    if (value >= LLONG_MAX_PLUS_ONE)
+    {
+        return 9223372036854775807LL;
+    }
+    if (value < LLONG_MIN_AS_DOUBLE)
+    {
+        return -9223372036854775807LL - 1;
+    }
+    return static_cast<long long>(value);
+}
+#endif
+
 int main()
 {
     double valuedouble = nondet_double();
@@ -47,11 +69,15 @@ int main()
 
 #ifdef FIXED
     /* The fix saturates the way cJSON's own parse_number already does for
-     * valueint ("use saturation in case of overflow", cJSON.cpp:401). */
+     * valueint ("use saturation in case of overflow", cJSON.cpp:404). */
     __ESBMC_assert(valuedouble >= LLONG_MIN_AS_DOUBLE || converted == (-9223372036854775807LL - 1),
                    "below the range, saturates low");
     __ESBMC_assert(valuedouble < LLONG_MAX_PLUS_ONE || converted == 9223372036854775807LL,
                    "above the range, saturates high");
+#endif
+#ifdef EQUIVALENCE
+    __ESBMC_assert(ToInt64Saturating(valuedouble) == converted,
+                   "the shipped helper agrees with the model above");
 #endif
     (void)converted;
     return 0;

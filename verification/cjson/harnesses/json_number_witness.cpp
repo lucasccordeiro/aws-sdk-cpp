@@ -2,8 +2,9 @@
  * Drives Aws::Utils::Json::JsonValue exactly as a generated deserializer does:
  * construct from a response body, then read a numeric field.
  *
- *   JsonValue(const Aws::String&)          JsonSerializer.cpp:44
- *   JsonView::GetInt64 -> AsInt64          JsonSerializer.cpp:506
+ *   JsonValue(const Aws::String&)          JsonSerializer.cpp:28
+ *   JsonView::GetInt64                     JsonSerializer.cpp:491
+ *   JsonView::WriteCompact / WriteReadable JsonSerializer.cpp:669, :686
  *   JsonView::IsIntegerType                JsonSerializer.cpp:629
  *
  * Every input below is a well-formed JSON document that a service could return.
@@ -31,15 +32,18 @@ static void probe(const char* label, const char* body)
     const auto view = doc.View();
     const auto n = view.GetObject("n");
 
-    std::printf("%-14s %-34s isInteger=%d isFloat=%d AsInt64=%" PRId64 " AsDouble=%g\n",
+    std::printf("%-14s %-34s isInteger=%d isFloat=%d AsInt64=%" PRId64 " GetInt64=%" PRId64 " AsDouble=%g\n",
                 label, body,
                 static_cast<int>(n.IsIntegerType()),
                 static_cast<int>(n.IsFloatingPointType()),
                 static_cast<int64_t>(n.AsInt64()),
+                static_cast<int64_t>(view.GetInt64("n")),
                 n.AsDouble());
 
-    const Aws::String printed = doc.View().WriteCompact();
-    std::printf("%-14s round-trip: %s\n", label, printed.empty() ? "<EMPTY>" : printed.c_str());
+    const Aws::String compact = doc.View().WriteCompact();
+    std::printf("%-14s round-trip: %s\n", label, compact.empty() ? "<EMPTY>" : compact.c_str());
+    const Aws::String readable = doc.View().WriteReadable();
+    std::printf("%-14s readable: %s\n", label, readable.empty() ? "<EMPTY>" : "printed");
 }
 
 static const struct { const char* label; const char* body; } CASES[] = {
@@ -49,6 +53,11 @@ static const struct { const char* label; const char* body; } CASES[] = {
     {"exp-dot",    "{\"n\":1.5e300}"},
     {"inf-dot",    "{\"n\":1.0e999}"},
     {"26-digits",  "{\"n\":99999999999999999999999999}"},
+    /* Appended rather than grouped with the other exponent form: the indices
+     * are quoted in REPORT.md and README.md. 5e9 is in range for int64 and
+     * still kept as a literal, which is what makes J-3 a corruption of a value
+     * the SDK could have represented exactly. */
+    {"exp-in-range", "{\"n\":5e9}"},
 };
 
 /* Document carries the same four accessors and the same two writers
@@ -64,10 +73,16 @@ static void probe_document(const char* label, const char* body)
     }
 
     const auto n = doc.View().GetObject("n");
-    std::printf("%-14s %-34s isInteger=%d AsInt64=%" PRId64 "\n",
-                label, body, static_cast<int>(n.IsIntegerType()), static_cast<int64_t>(n.AsInt64()));
-    const Aws::String printed = doc.View().WriteCompact();
-    std::printf("%-14s round-trip: %s\n", label, printed.empty() ? "<EMPTY>" : printed.c_str());
+    std::printf("%-14s %-34s isInteger=%d isFloat=%d AsInt64=%" PRId64 " GetInt64=%" PRId64 "\n",
+                label, body,
+                static_cast<int>(n.IsIntegerType()),
+                static_cast<int>(n.IsFloatingPointType()),
+                static_cast<int64_t>(n.AsInt64()),
+                static_cast<int64_t>(doc.View().GetInt64("n")));
+    const Aws::String compact = doc.View().WriteCompact();
+    std::printf("%-14s round-trip: %s\n", label, compact.empty() ? "<EMPTY>" : compact.c_str());
+    const Aws::String readable = doc.View().WriteReadable();
+    std::printf("%-14s readable: %s\n", label, readable.empty() ? "<EMPTY>" : "printed");
 }
 
 int main(int argc, char** argv)
