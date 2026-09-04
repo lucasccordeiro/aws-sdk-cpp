@@ -4,7 +4,7 @@
  * src/cpp/library/streambuf:83-96 declares eback, gptr, egptr, gbump, setg,
  * pbase, pptr, epptr, pbump and setp, and defines none of them. So setg writes
  * nowhere and the accessors return unconstrained values: both assertions below
- * fail, although [streambuf.get.area]/6 states them as setg's postconditions.
+ * fail, although [streambuf.get.area]/5 (N3337) states them as setg's postconditions.
  *
  * The consequence is that no user-derived stream buffer can be verified as
  * written -- its arithmetic lives in these calls. aws-sdk-cpp has eight classes
