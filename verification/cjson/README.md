@@ -5,6 +5,16 @@ cJSON vendored in `aws-cpp-sdk-core`, and read back through
 `Aws::Utils::Json::JsonView` (or `Aws::Utils::DocumentView`, which repeats the
 same code). Pinned here at **1.11.886** (`31583cee6ed69015a7e63fefae5b931ae9f3196e`),
 the current release on 2026-09-04; `vendor/` holds the four files unmodified.
+All four are unchanged through 1.11.890, so every release up to 1.11.890 is affected.
+
+**Fixed upstream in [1.11.891](https://github.com/aws/aws-sdk-cpp/releases/tag/1.11.891).**
+Reported to AWS on 2026-09-05 and closed by
+[PR #3921](https://github.com/aws/aws-sdk-cpp/pull/3921), merged 2026-09-10. The
+shipped code is the patch in `fix/` with its three helpers moved into a new
+header, `aws/core/utils/numeric/NumericUtils.h`. It went out as a bug fix with
+no advisory or CVE. Rebuilt against the 1.11.891 files, the fifteen-body witness
+table matches the patched tree on all 30 runs, with no sanitizer diagnostic and
+no abort. `REPORT.md` has the details.
 
 The parser is not where the defects are. 595,000 libFuzzer executions over
 parse / print / re-parse under ASan and UBSan found nothing, and normalising the
@@ -144,7 +154,8 @@ harnesses/      One proof, one test-case generator input and one replay driver
                 cjson_parse_fuzz.cpp      libFuzzer entry point for the parser
 stubs/          verification-only substitutes (memory system, logging, the two
                 CRT headers Array.h pulls in), each documenting what it replaces
-fix/            the proposed patch, 17 hunks across the four files
+fix/            the patch we proposed, 17 hunks across the four files; the
+                logic 1.11.891 shipped
 results/        build outputs and logs (regenerated; safe to delete)
 ```
 

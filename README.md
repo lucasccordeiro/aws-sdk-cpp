@@ -78,7 +78,12 @@ from symbolic input alone — each stated as a property with the length, the
 double, the mantissa and the exponent left free, and no triggering value named —
 and its test-case generator then names a concrete value in each region of every
 defect's condition, which the suite runs against the pristine SDK under the
-sanitizers. A patch and the proofs are in
+sanitizers. Reported to AWS on 2026-09-05, all three were fixed in
+[PR #3921](https://github.com/aws/aws-sdk-cpp/pull/3921), merged 2026-09-10 and
+first tagged in
+**[1.11.891](https://github.com/aws/aws-sdk-cpp/releases/tag/1.11.891)**. The
+code is our patch with its helpers moved into a shared header, and it went out as
+a bug fix with no advisory. The proofs are in
 [verification/cjson/](verification/cjson/).
 
 A short public write-up of the exercise was

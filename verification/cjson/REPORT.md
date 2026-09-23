@@ -20,7 +20,10 @@ parser itself is not one of them: 595k libFuzzer executions over parse / print /
 re-parse under ASan and UBSan found nothing, and the fork carries no
 memory-safety drift from upstream cJSON v1.7.19. All three grow out of
 one feature AWS added on top of upstream, and all three are closed by the patch
-in `fix/`.
+in `fix/`. **Fixed upstream in 1.11.891**: reported 2026-09-05, closed by
+[aws/aws-sdk-cpp#3921](https://github.com/aws/aws-sdk-cpp/pull/3921), merged
+2026-09-10. Every release up to 1.11.890 is affected; see
+*What 1.11.891 shipped*.
 
 ---
 
@@ -596,6 +599,44 @@ printer error, not J-1 itself.
   caps at 20 (`char buf[21]`, `%lld`). Shorter stale literals printed before the
   patch too. No in-SDK caller does this; reported here so a reviewer does not
   find it and wonder whether it was missed.
+
+## What 1.11.891 shipped
+
+[PR #3921](https://github.com/aws/aws-sdk-cpp/pull/3921) (merge `9fc9d13c`,
+first tagged in 1.11.891 at `29b4b86c`) takes the patch above hunk for hunk: the
+same `print_number` copy, the same saturating conversion, `strtoll` literal read,
+range-tested predicates and null-checked writers, and the same
+`strtoll`/`strtol` in `StringUtils.cpp`. It differs in three ways:
+
+- **The helpers are shared.** AWS chose the cleaner option described above.
+  `IsRepresentableAsInt64`, `ToInt64Saturating` and `LiteralToInt64` are now
+  `inline` functions in `Aws::Utils`, in a new installed header,
+  `aws/core/utils/numeric/NumericUtils.h`. They are no longer duplicated
+  file-local copies, which makes them public API.
+- **The bounds come from `std::numeric_limits<int64_t>::min()`** instead of
+  literals. They are the same two doubles, -2^63 and 2^63, so the guard is still
+  `d >= -2^63 && d < 2^63`, not the `d <= (double)INT64_MAX` mistake.
+- **The comments are gone**, including the note on why the writers return an
+  empty string rather than `"{}"`. The behaviour is unchanged.
+
+The PR adds four `JsonSerializerTest` cases: the 26-digit round trip, 2^63 as a
+literal and as a double, and `5e9`. It also adds `StringUtilsTest` rows that pin
+`ConvertToInt64("5e9") == 5` on purpose, because the JSON path, not
+`ConvertToInt64`, is responsible for exponent forms. AWS released it as a bug fix
+(changelog: "saturate out-of-range double-to-int64 conversions instead of relying
+on undefined behavior") with no advisory or CVE.
+
+**Checked against the release, not the PR.** We ran the witness table against
+the four modules and `NumericUtils.h` from the 1.11.891 tag, with GCC under ASan
+and UBSan, including `float-cast-overflow`. All fifteen bodies, through
+`JsonValue` and `Document`, read a value back with no diagnostic and no abort.
+All 30 outputs are byte-identical to the same harness built against `fix/`
+applied to 1.11.886. The four files at 1.11.890 are byte-identical to `vendor/`,
+so 1.11.891 is the first fixed release. Every item under *What the patch does
+not do* still applies. For example, `{"n":5e9}` now reads back as `5000000000`
+but still reports `IsIntegerType() == false`. This was a one-off check. The
+suite still pins 1.11.886, and `./reproduce.sh fix` tests `fix/`, not the
+shipped files.
 
 ## Not claimed
 
