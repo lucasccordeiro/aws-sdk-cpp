@@ -53,6 +53,39 @@ performs the seeks the last two need, so these are again defects in public API �
 with the difference that the first one is memory corruption. A patch and the
 proofs are in [verification/streambuf/](verification/streambuf/).
 
+The JSON number path was examined next, at 1.11.886, and this time the target was
+chosen for reachability: it is what every JSON-protocol response body goes
+through. The vendored cJSON parser itself came out clean — 595k libFuzzer
+executions under ASan and UBSan found nothing, and the fork carries no
+memory-safety drift from upstream v1.7.19 — but the feature AWS added on top of
+it does not survive contact with the rest of the code. `parse_number` keeps a
+big integer's literal in `valuestring`, a field the printer assumes is short and
+the wrapper assumes belongs to a string: a response number of 26 or more
+characters makes `cJSON_AS4CPP_Print` fail, and `JsonView::WriteCompact` then
+builds an `Aws::String` from the null pointer it returns — `std::logic_error`,
+process abort. Inside the SDK that one needs trace logging on, since the error
+marshaller's call to it sits in `AWS_LOGSTREAM_TRACE`; it is unconditional for an
+application that prints a document it received. Separately, four sites convert
+the parsed `double` to a 64-bit integer with no range check, which is undefined
+for `{"n":1.5e300}` and for the `inf` that `{"n":1.0e999}` parses to, and the
+kept literal is read back with `atoll`, which stops at the exponent — so
+`{"n":5e9}` reads as `5`, nine orders of magnitude off a value `int64` holds
+exactly. That last one is a regression, first shipped in 1.11.660: before it the
+literal was not kept for exponent forms at all, and the same body read back
+correctly. Generated deserializers reach the last two on every `int64` field, with
+no logging and no application involvement. ESBMC finds all three
+from symbolic input alone — each stated as a property with the length, the
+double, the mantissa and the exponent left free, and no triggering value named —
+and its test-case generator then names a concrete value in each region of every
+defect's condition, which the suite runs against the pristine SDK under the
+sanitizers. Reported to AWS on 2026-09-05, all three were fixed in
+[PR #3921](https://github.com/aws/aws-sdk-cpp/pull/3921), merged 2026-09-10 and
+first tagged in
+**[1.11.891](https://github.com/aws/aws-sdk-cpp/releases/tag/1.11.891)**. The
+code is our patch with its helpers moved into a shared header, and it went out as
+a bug fix with no advisory. The proofs are in
+[verification/cjson/](verification/cjson/).
+
 A short public write-up of the exercise was
 [posted on 2026-08-13](https://www.linkedin.com/posts/lucas-cordeiro-3156233_formalverification-memorysafety-esbmc-share-7493503595426963457-OZeH/),
 with AWS's permission.
