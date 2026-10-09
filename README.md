@@ -18,8 +18,12 @@ the pristine SDK under ASan and UBSan.
 The Base64, DateTime and JSON defects went to AWS Security under coordinated
 disclosure. The Base64 defects are covered by
 [Security Bulletin 2026-080-AWS](https://aws.amazon.com/security/security-bulletins/2026-080-aws/).
-The others are latent bugs in public API with no untrusted caller, published
-directly with a patch.
+AWS fixed the JSON defects in 1.11.891 and assessed them as out of scope for a
+CVE: the abort needs existing control of the service endpoint or the TLS
+connection, and the other two are correctness defects. The
+[release notes](https://github.com/aws/aws-sdk-cpp/releases/tag/1.11.891)
+acknowledge the report. The others are latent
+bugs in public API with no untrusted caller, published directly with a patch.
 
 Each directory has a `README.md` and a `REPORT.md` with the full analysis, plus
 a `reproduce.sh` or `Makefile` that reruns its checks.
