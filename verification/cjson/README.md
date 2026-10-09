@@ -14,7 +14,9 @@ shipped code is the patch in `fix/` with its three helpers moved into a new
 header, `aws/core/utils/numeric/NumericUtils.h`. It went out as a bug fix with
 no advisory or CVE: AWS Security assessed that J-1's abort needs existing control
 of the service endpoint or the TLS connection, and that J-2 and J-3 are
-correctness defects, so none is in scope for a CVE. Rebuilt against the 1.11.891 files, the fifteen-body witness
+correctness defects, so none is in scope for a CVE. The release notes list it
+under "Defense in Depth" and credit Lucas Carvalho Cordeiro and Rafael Sa
+Menezes, University of Manchester. Rebuilt against the 1.11.891 files, the fifteen-body witness
 table matches the patched tree on all 30 runs, with no sanitizer diagnostic and
 no abort. `REPORT.md` has the details.
 
