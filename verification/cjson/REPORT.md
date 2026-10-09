@@ -626,6 +626,11 @@ literal and as a double, and `5e9`. It also adds `StringUtilsTest` rows that pin
 (changelog: "saturate out-of-range double-to-int64 conversions instead of relying
 on undefined behavior") with no advisory or CVE.
 
+**AWS Security's assessment.** J-1's abort requires an attacker who already
+controls the service endpoint or the TLS connection, and J-2 and J-3 are
+correctness defects. AWS therefore judged none of the three to be in scope for a
+CVE.
+
 **Checked against the release, not the PR.** We ran the witness table against
 the four modules and `NumericUtils.h` from the 1.11.891 tag, with GCC under ASan
 and UBSan, including `float-cast-overflow`. All fifteen bodies, through
